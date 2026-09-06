@@ -252,6 +252,26 @@ def test_worst_case_bound_and_improvement_over_the_trapezoid(capsys):
     assert worst_new < 0.5 * worst_old, (worst_new, worst_old)
 
 
+def _box_m1_grid(m_min, n_coarse=60, n_near=200, near_decades=3.0):
+    """m1 over the whole prior box, REFINED in the band just above m_min.
+
+    Until 2026-09-06 this test swept 60 log-spaced points over [m_min, 250] and
+    reported 7.4e-08 nats for the shipped rule -- a bound on that sample, not on
+    the box.  The taper-panel residual lives in a narrow band just above m_min,
+    where the whole q-support sits inside the Planck taper and the plateau panel
+    has zero width: at (m_min, dm_min, beta) = (3.05, 9.50, -1.95) the 60-point
+    grid measured 2.6e-07 where a 4000-point grid measures 5.2e-03, because its
+    coarsest cells there are ~8% wide and the residual peaks at m1/m_min ~ 1.02.
+    That is the coordinate at which the 259-event production likelihood tilted
+    6.98e-02 nats over H0.  The refinement below resolves m1/m_min to 0.55%.
+    """
+    coarse = np.exp(np.linspace(np.log(m_min), np.log(250.0), n_coarse))
+    hi = min(near_decades * m_min, 250.0)
+    near = np.exp(np.linspace(np.log(m_min), np.log(hi), n_near))
+    m1 = np.unique(np.concatenate([coarse, near]))
+    return np.clip(m1, m_min * (1.0 + 1e-9), None)
+
+
 def test_worst_case_bound_over_the_full_prior_box(capsys):
     """The bound over the WHOLE support, not just the cells above m_min.
 
@@ -264,11 +284,17 @@ def test_worst_case_bound_over_the_full_prior_box(capsys):
     (``PairingModel._plateau_integral``), so what is left here is the TAPER
     panel's residual, which is largest at a WIDE taper and mild beta.  Swept
     over the reachable powerlaw+peak corners (m_min in [2, 10], dm_min in
-    [0, 10], beta in [-2, 7]) plus 40 draws, m1 log-spaced over [m_min, 250]:
+    [0, 10], beta in [-2, 7]) plus 40 draws, m1 log-spaced over [m_min, 250]
+    and REFINED just above m_min (see :func:`_box_m1_grid` -- the unrefined
+    60-point sweep this test used until 2026-09-06 stepped over the band that
+    carries the residual and reported 7.4e-08, five orders below the truth):
 
-        GL-16 + closed plateau (shipped)     7.4e-8 nats, at
-                                             (8.42, 8.67, -0.84), m1 = 15.8
-        200-node trapezoid (pre-2026-09-05)  2.9e-1 nats
+        GL-32 + closed plateau (shipped)     1.1e-3 nats, at
+                                             (2.0, 10.0, 0.0), m1 = 2.08
+        GL-16 + closed plateau (until
+        2026-09-06)                          5.0e-3 nats, same coordinate
+        200-node trapezoid (pre-2026-09-05)  3.1e-2 nats on that draw,
+                                             2.9e-1 over the box
 
     i.e. better on EVERY draw (the loop fails if any draw inverts).  The
     statistic that decides admissibility is the coherent part, which
@@ -280,31 +306,53 @@ def test_worst_case_bound_over_the_full_prior_box(capsys):
     rng = np.random.default_rng(11)
     draws = [(2.0, 0.01, -2.0), (2.0, 0.0, -2.0), (3.0, 0.0, -2.0),
              (10.0, 0.05, -2.0), (2.0, 10.0, 0.0), (5.0, 3.0, 1.0),
-             (10.0, 10.0, 7.0), (3.5, 0.01, 7.0)]
+             (10.0, 10.0, 7.0), (3.5, 0.01, 7.0),
+             # The e2e failing corner: a low floor, the widest taper and a
+             # steeply negative beta.  m2_low = 3.05, delta_m2 = 9.50,
+             # beta_q = -1.95 is where the 259-event production logL tilted
+             # 6.98e-02 nats over H0 in [20, 140] at PAIRING_PANEL_NQ = 16.
+             (3.05, 9.50, -1.95), (3.05, 8.00, -1.95)]
     draws += [(float(rng.uniform(2.0, 10.0)), float(rng.uniform(0.0, 10.0)),
                float(rng.uniform(-2.0, 7.0))) for _ in range(40)]
     worst_new = worst_old = 0.0
+    argworst = None
     for m_min, dm_min, beta in draws:
         theta = jnp.asarray([beta])
-        m1 = np.exp(np.linspace(np.log(m_min), np.log(250.0), 60))
-        m1 = np.clip(m1, m_min * (1.0 + 1e-9), None)
+        m1 = _box_m1_grid(m_min)
         ref = reference_norm(PL, m1, m_min, dm_min, theta)
         new_v = shipped_norm(PL, m1, m_min, dm_min, theta)
         old_v = _trap200(m1, m_min, dm_min, theta)
         ok = (ref > 0) & (new_v > 0) & (old_v > 0)
         if not ok.any():
             continue
-        e_new = float(np.max(np.abs(np.log(new_v[ok]) - np.log(ref[ok]))))
+        d_new = np.abs(np.log(new_v[ok]) - np.log(ref[ok]))
+        e_new = float(np.max(d_new))
         e_old = float(np.max(np.abs(np.log(old_v[ok]) - np.log(ref[ok]))))
         assert e_new <= e_old, (m_min, dm_min, beta, e_new, e_old)
+        if e_new > worst_new:
+            argworst = (m_min, dm_min, beta, float(m1[ok][int(np.argmax(d_new))]))
         worst_new = max(worst_new, e_new)
         worst_old = max(worst_old, e_old)
     with capsys.disabled():
         print(f"\n[pairing_panel] worst |Delta log N| over the FULL prior box "
-              f"(m1 in [m_min, 250], 48 corners/draws):\n"
-              f"    GL-16 + closed plateau (shipped): {worst_new:.3e}\n"
+              f"(m1 in [m_min, 250], refined above m_min, "
+              f"50 corners/draws):\n"
+              f"    GL-{U.PAIRING_PANEL_NQ} + closed plateau (shipped): "
+              f"{worst_new:.3e}  at (m_min, dm, beta, m1) = {argworst}\n"
               f"    200-node trapezoid (pre-2026-09-05): {worst_old:.3e}")
-    assert worst_new < 1.0e-6, worst_new           # documented FULL-BOX bound
+    # MEASURED FULL-BOX BOUND, and the reason it is 2.5e-3 and not tighter.
+    # On this grid the shipped rule scores 1.117e-03 at PAIRING_PANEL_NQ = 32
+    # and 5.000e-03 at 16, both at (m_min, dm_min, beta) = (2.0, 10.0, 0.0),
+    # m1 = 2.079 -- a support that lies ENTIRELY inside the toe of a taper ten
+    # times wider than the distance from the floor, which is the hardest thing
+    # a fixed-node rule on this panel ever sees.  2.5e-3 therefore separates
+    # the two rules with 2.2x of headroom above the shipped one, and this
+    # assert FAILS at 16.  It is not tightened further because the loop's own
+    # draws are random and because the statistic that decides admissibility is
+    # the COHERENT part, pinned by
+    # test_h0_coherent_component_is_far_below_the_tilt_budget -- an amplitude
+    # of 1e-3 at one m1 is not by itself an H0 tilt.
+    assert worst_new < 2.5e-3, (worst_new, argworst)
     assert worst_new < 0.25 * worst_old, (worst_new, worst_old)
 
 
@@ -316,22 +364,35 @@ def test_h0_coherent_component_is_far_below_the_tilt_budget(capsys):
     259-event PE term is therefore ``259 * ptp_s <dlogN(m1 s)>``.  A smaller
     worst case does NOT imply a smaller tilt (measured inversions exist between
     quadrature rules), so it is asserted directly, against the 0.05-nat budget.
+
+    THE POPULATION MUST REACH THE FLOOR.  Until 2026-09-06 it was drawn from
+    m1 >= 5.0, so at m_min = 3.05 it never sampled the band between the floor
+    and the taper shoulder -- exactly where the taper panel's residual lives --
+    and reported 2.9e-06 nats at (3.05, 9.50, -1.95) while the 259-event
+    production likelihood tilted 6.98e-02 there.  Drawing from m1 >= 2.0
+    instead (samples below a corner's own floor carry no support and drop out
+    of the mean) makes the same statistic 3.2e-03 at PAIRING_PANEL_NQ = 16 and
+    3.4e-04 at 32.
     """
     rng = np.random.default_rng(0)
     n = 6000
     u = rng.random(n)
-    a, lo, hi = 3.5, 5.0, 100.0
+    a, lo, hi = 3.5, 2.0, 100.0
     pl = (lo ** (1 - a) + u * (hi ** (1 - a) - lo ** (1 - a))) ** (1 / (1 - a))
     pop = np.where(rng.random(n) < 0.85, pl, np.clip(rng.normal(34.0, 4.0, n), lo, hi))
     svals = np.exp(np.linspace(np.log(0.75), np.log(1.35), 11))
 
     rows = []
-    # The last three are the corners where the AMPLITUDE bound is worst
-    # (steeply negative beta, lowest floor, narrowest taper): the amplitude and
-    # the tilt do not order rules the same way, so they are pinned here too.
+    # Rows 4-6 are the corners where the AMPLITUDE bound is worst (steeply
+    # negative beta, lowest floor, narrowest taper): the amplitude and the tilt
+    # do not order rules the same way, so they are pinned here too.  Rows 7-8
+    # are the e2e failing band -- a low floor, a WIDE taper and a steep negative
+    # beta -- which this test's six original corners did not contain (the
+    # closest was (4.0, 5.0, -1.5)).
     for m_min, dm_min, beta in [(5.0, 3.0, 1.0), (5.0, 0.5, 1.0), (4.0, 5.0, -1.5),
                                 (2.0, 0.05, -2.0), (2.0, 0.01, -1.5),
-                                (10.0, 0.05, -2.0)]:
+                                (10.0, 0.05, -2.0),
+                                (3.05, 9.50, -1.95), (3.05, 8.00, -1.95)]:
         theta = jnp.asarray([beta])
         means = []
         for s in svals:
@@ -345,8 +406,16 @@ def test_h0_coherent_component_is_far_below_the_tilt_budget(capsys):
         print("\n[pairing_panel] H0-coherent component, 259 x ptp_s <dlogN>:")
         for m_min, dm_min, beta, tilt in rows:
             print(f"    m_min={m_min:5} dm={dm_min:6} beta={beta:5}: {tilt:.3e} nats")
+    # MEASURED BOUND.  With the population reaching m1 = 2.0 the worst row is
+    # 3.157e-03 at PAIRING_PANEL_NQ = 16 -- (3.05, 9.50, -1.95), the coordinate
+    # where the 259-event likelihood tilts 6.98e-02 -- against 4.673e-04 at 32,
+    # so 1.0e-3 fails the old node count on four of these eight rows and passes
+    # the shipped one with 2.1x of headroom.  The 259x factor makes this the
+    # same currency as the campaign's 0.05-nat H0-tilt budget, and it is pinned
+    # 50x below it because a per-sample rule that is only just inside the budget
+    # on a synthetic population has no margin left for the real one.
     for m_min, dm_min, beta, tilt in rows:
-        assert tilt < 5.0e-3, (m_min, dm_min, beta, tilt)
+        assert tilt < 1.0e-3, (m_min, dm_min, beta, tilt)
 
 
 # ---------------------------------------------------------------------------
