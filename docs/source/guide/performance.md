@@ -355,3 +355,96 @@ both arms, and so is the block-size plan: both arms report `auto-single-pass`
 with `free 67.6 GiB` and the same 22.6 GiB peak device memory, because the transients of the sort are
 dead long before the planner probes. The spectral configuration carries no
 `--survey_path` and never reaches `load_survey`, so nothing about it changes.
+
+## Startup: the catalog read decompresses its chunks in parallel
+
+The 259-event DESI nside-64 catalog is 480 MB on disk and 2.03 GB in memory:
+`zgals` / `dzgals` / `wgals` are 49,152 x 1,719 float64 tables stored in
+(768, 27) chunks behind a shuffle + deflate filter pipeline, 4,096 chunks each.
+Reading them is decompression-bound, not I/O-bound -- the raw chunk bytes come
+off this Lustre filesystem in 0.46 s cold (1053 MB/s) and 0.09 s warm, while
+`np.asarray(f['zgals'])` and its two siblings take 4.6 s with the page cache
+warm and 5.5 s cold.
+
+h5py cannot be parallelised: HDF5 serializes, and four threads on four
+separate file handles measure 4.55-4.62 s against 4.59 s sequential. What does
+parallelise is doing the inflate ourselves. `load_survey` reads its four
+datasets through `darksirens.catalogs.io.read_dataset_chunked`, which pulls
+each stored chunk with `dataset.id.read_direct_chunk` on the calling thread and
+hands it to a small `ThreadPoolExecutor`, where `zlib.decompress` (which
+releases the GIL) inflates it and the byte un-shuffle transposes it straight
+into its disjoint slice of one preallocated array.
+
+The pool is four workers, not more. Only the inflate is GIL-free: on
+`zgals` (4,096 chunks) the per-chunk split is 1.51 s of `zlib` against 1.04 s of
+un-shuffle plus 0.36 s of assemble, i.e. 48% of the work holds the GIL and the
+Amdahl ceiling is 2.08x. Measured on this box, warm cache, median of three
+reads of the four datasets: sequential 4.68 s, 2 workers 3.60 s, 4 workers
+1.93 s, 6 workers 2.63 s, 8 workers 4.27 s, 16 workers 3.48 s. Past ~4 workers
+GIL convoying eats the win, so raising the worker count is a regression, not a
+bigger gain.
+
+**The floor is not "degrades to sequential" -- below two usable CPUs the
+threaded read is slower than the h5py read it replaces**, because the
+un-shuffle and the assemble copy are then pure added Python with no inflate to
+overlap against: one worker measures 6.41 s against 4.53 s sequential, a 1.4x
+regression. So the pool is sized by `len(os.sched_getaffinity(0))`, not by
+`os.cpu_count()` -- the two differ on any cpuset-restricted allocation (a
+`--cpus-per-task=1` batch job still reports 64 host cores) -- and the whole
+raw-chunk path is refused below two usable CPUs. Two is already a win
+(`taskset -c 20,21`: 3.34 s against 4.42 s). A cgroup CPU *quota* is a
+fractional limit rather than a mask and no affinity call can see it, so
+`DARKSIRENS_CATALOG_CHUNKED_READ=0` forces the plain h5py read everywhere; the
+arrays are the same bytes either way.
+
+Host memory is bounded. The calling thread reads raw chunks about ten times
+faster than the pool inflates them, so an unbounded submit loop would hold the
+whole *compressed* dataset in the executor queue. The loop caps the in-flight
+chunks at four per worker, which costs nothing measurable (2.01 s bounded
+against 2.10 s unbounded, medians of three) and holds peak host RSS at the
+sequential read's: 0.76-0.77 GB bounded, 0.78 GB sequential, 0.90-0.91 GB
+unbounded.
+
+The arrays are the same bytes, so nothing numeric changes. This is not a
+tolerance claim: the result of `read_dataset_chunked` is byte-for-byte the
+result of `np.asarray(dset)`, verified with `tobytes()` equality on all four
+production datasets and on synthetic files exercising every edge (partial edge
+chunks on both axes, 4- and 8-byte dtypes, 1-D datasets, 2/4/8 workers).
+
+`read_dataset_chunked` reimplements exactly one filter pipeline -- shuffle,
+then deflate -- so it refuses everything else and reads it with plain h5py
+instead. The refusal tests the dataset creation property list for pipeline
+*equality*, not for the presence of individual filters: `dataset.compression`,
+`.shuffle`, `.fletcher32` and `.scaleoffset` each answer "is this filter in the
+pipeline" and cannot see a third filter or the order, so a legal
+`(shuffle, nbit, deflate)` dataset passes every one of them, raises no error,
+and decodes to different bytes on every element, while `(deflate, shuffle)` is
+indistinguishable from the pipeline handled here. Pipeline equality refuses
+both deliberately, and with them fletcher32, scale-offset, lzf and any
+third-party filter id. Also refused: contiguous datasets (a virtual dataset is
+one of these), non-numeric dtypes, datasets under 64 MB, and partially
+allocated datasets -- a chunk that was never written has no stored bytes, and
+h5py's exception for one is not even of a stable type, so the chunk count is
+checked up front instead. Finally, at read time, any chunk whose `filter_mask`
+is non-zero (HDF5 stored it with part of the pipeline skipped) sends the whole
+dataset to h5py, with a `RuntimeWarning` naming the dataset -- a fallback taken
+after the gate admitted the file is worth reporting rather than silently losing
+the 2.2x.
+
+Measured on an H100 NVL with `scripts/benchmarks/bench_likelihood_call.py
+--n-calls 20`, 259-event DESI nside-64 production configuration (H0 +
+population + survey sampled, `zspace`-24/`ns6` quadrature, auto blocking, no
+XLA cache), on top of the device row sort above, three interleaved launches per
+arm, one arm per process:
+
+| Arm | `load_survey` | load phase | call median |
+|---|---|---|---|
+| sequential h5py | 5.61-5.91 s | 8.69-8.99 s | 59.0-59.8 ms |
+| threaded chunks | 3.10-3.33 s | 6.16-6.32 s | 59.2-59.6 ms |
+
+That is -2.55 s of `load_survey` (1.79x) and -2.63 s of the load phase on the
+medians. Per-call time is untouched (the hot path never sees this code), peak
+device memory is unchanged at 22.6 GiB, and the log-likelihood is byte-equal at
+all eight benchmark draws. The spectral configuration carries no
+`--survey_path` and never reaches `load_survey`, so nothing about it changes
+(14.0 ms/call in both arms).
