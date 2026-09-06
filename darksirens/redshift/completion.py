@@ -156,6 +156,8 @@ import warnings
 from contextlib import contextmanager
 
 import numpy as np
+
+from darksirens.utils.utils import array_shape
 import jax
 import jax.numpy as jnp
 from jax import jit, lax, vmap
@@ -717,8 +719,7 @@ def build_field_normalization_inputs(
         total observed real-galaxy count; ``occupied_pixels`` (n_occupied,)
         int32 global pixel ids keying the per-pixel budget modulations.
     """
-    full_z = np.asarray(full_z)
-    n_pix_total = int(full_z.shape[0])
+    n_pix_total = int(array_shape(full_z)[0])
 
     if full_n is not None:
         ngals_np = np.asarray(full_n).reshape(-1).astype(np.int64)
