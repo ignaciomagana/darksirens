@@ -180,6 +180,15 @@ spanning the corner does not. Each pairing model supplies its own shoulder
 (`PairingModel._taper_shoulder`), because `gwtc5_fiducial_bpl2peaks` tapers on
 its sampled `(m2_low, delta_m2)` rather than on the mixture's `(m_min, dm_min)`.
 
+Being bare above the shoulder, that upper panel is **not quadratured at all**
+for either production pairing: `PairingModel._plateau_integral` returns
+`int_{q_a}^{1} q**beta dq = (1 - q_a**(beta+1))/(beta+1)` (the `beta -> -1` limit
+`-log q_a` is a live branch — `beta` is sampled over `[-2, 7]`), so those models
+spend 16 nodes per sample, not 32, and the remaining nodes all sit in the
+boundary layer. A pairing without an analytic plateau — `GaussianPairing`, or
+any out-of-tree model — does not implement the hook and keeps the
+Gauss-Legendre panel unchanged.
+
 Sixteen nodes per panel are calibrated for a `q**beta` kernel — what both
 production pairings are above the shoulder. A pairing model whose kernel carries
 a feature *narrower than a panel* is not resolved by any fixed 16-node rule and
@@ -199,19 +208,32 @@ Measured on this repository at `f770956` on an NVIDIA H100 NVL, float64,
 
 | Configuration | Before | After | Speedup | Peak device memory |
 |---|---|---|---|---|
-| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 13.90 ms/call | 3.55 ms/call | 3.92x | 3.672 -> 0.776 GiB |
-| 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 59.2 ms/call | 48.1 ms/call | 1.23x | 22.620 -> 22.661 GiB |
-| the same run on the shipped sbatch pins (`--sel_batch_size 131072 --pe_event_block 32`) | 68.8 ms/call | 58.8 ms/call | 1.16x | — |
+| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 13.90 ms/call | 2.88 ms/call | 4.83x | 3.672 -> 0.640 GiB |
+| 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 59.2 ms/call | 46.6 ms/call | 1.27x | 22.620 -> 22.620 GiB |
+| the same run on the shipped sbatch pins (`--sel_batch_size 131072 --pe_event_block 32`) | 68.2 ms/call | 55.1 ms/call | 1.24x | 10.598 -> 10.599 GiB |
 
-The absolute saving is the same ~10-11 ms in all three; it is a larger fraction
-of the spectral call because that call has no catalog term, and a smaller one on
-the pinned dark-siren configuration because blocking makes the rest of the call
-more expensive. **A production run started from
-`experiments/desi_full259/sbatch_ns_joint_sel.sh` gets the 1.16x row**, not the
-1.23x one, unless it is switched to auto blocking first. On the spectral
+`Before` is master `f770956`, `After` the head of this change. The pinned row
+was re-measured for that head with both arms interleaved in one lock hold
+(master 68.65 / 67.91 / 68.20 ms against 55.27 / 55.09 / 54.59); the
+peak-memory column comes from a separate hold that replays eight fiducial calls
+per arm and reads the device allocator.
+
+The closed plateau is the last 0.69 ms of the spectral row (3.57 -> 2.88 ms,
+1.24x, and the 0.776 -> 0.640 GiB of the memory column), 0.90 ms of the
+auto-blocked dark-siren row (47.49 -> 46.59 ms, 1.02x) and 1.36 ms of the pinned
+one (55.70 -> 54.34 ms, 1.025x), each measured as three interleaved launches per
+arm; the dark-siren peak memory is unmoved by it (22.620 GiB in both arms of
+that A/B), because the catalog KDE, not the q axis, sets it.
+
+The absolute saving is ~11-13 ms in all three; it is a larger fraction of the
+spectral call because that call has no catalog term. **A production run started
+from `experiments/desi_full259/sbatch_ns_joint_sel.sh` gets the third row**, not
+the second, unless it is switched to auto blocking first: the speedups are
+close, but the pinned call is ~9 ms/call more expensive in absolute terms (it
+buys that back in peak memory, 10.6 GiB against 22.6). On the spectral
 configuration the pairing q-axis was also the dominant allocation, which is why
-the peak device memory falls 4.7x there and is flat (+0.2%) on the dark-siren
-configuration, whose blocking is unchanged.
+the peak device memory falls 5.7x there and does not move at all on the
+auto-blocked dark-siren configuration, whose blocking is unchanged.
 
 Accuracy is a **correction**, not a regression. Against a converged
 composite-Gauss-Legendre reference, holding the population and survey blocks at
@@ -221,17 +243,44 @@ their fiducials and scanning `H0` across its full prior:
 |---|---|---|---|
 | 259-event dark sirens, H0 in [20, 140] | 200-node trapezoid | -0.349 nats | **-0.101 nats** |
 | | 2-panel GL-16 | +1.8e-4 nats | +1.2e-3 nats |
+| | GL-16 + closed plateau | +1.8e-4 nats | +1.2e-3 nats |
 | 259-event spectral, H0 in [20, 120] | 200-node trapezoid | -0.303 nats | +0.044 nats |
 | | 2-panel GL-16 | -1.1e-5 nats | +9.1e-7 nats |
+| | GL-16 + closed plateau | -1.1e-5 nats | +9.1e-7 nats |
+
+At the fiducial population the closed plateau changes nothing measurable (the
+two rules differ by 2.1e-8 nats across the whole dark-siren H0 prior, and not at
+all on the spectral one). It matters at **steep negative `beta`**, where the
+plateau integrand `q**beta` is itself a boundary layer at `q_a = m_shoulder/m1`
+— which shrinks like `1/m1`, so the Gauss-Legendre residual grows with `m1` and
+does not self-average over the mass population. Repeating the same scan with
+`(beta_q, m2_low, delta_m2) = (-1.9, 3.05, 1.15)`, inside the shipped prior:
+
+| Rule | Error across the H0 prior [20, 140] | Trend |
+|---|---|---|
+| 2-panel GL-16 | 0.93 nats peak-to-peak | **-1.04 nats** |
+| GL-16 + closed plateau | 2.0e-4 nats peak-to-peak | -2.8e-5 nats |
+
+So the closed form removes an H0-correlated systematic twenty times over the
+0.05-nat budget in a corner of the prior a sampler visits. Over a 400-draw prior
+box swept from the support edge up (600 log-spaced `m1` each, so the taper
+panel's own near-edge residual dominates it) the worst `|Delta log N|` also
+falls, 6.7e-3 nats to 4.6e-3, and no draw gets worse.
 
 The trapezoid's residual is a one-sided endpoint deficit that does not
 self-average over the mass population, so it tilts with `H0`
 (`m1src = m1det/(1+z(H0))` rescales the whole population). Removing an
 H0-correlated systematic of -0.10 nats is the reason this change is admissible;
-the per-call worst-case improvement is only ~4x near the support edge (7.6e-3
-nats against 3.1e-2) and ~6x over the whole prior box (4.6e-2 against 2.9e-1,
-both at `m_min = 2`, `dm_min = 0`, `beta = -2`, `m1 = 250`, where the new rule's
-residual is largest and the H0-coherent part of it is still 2.2e-3 nats). Golden log-likelihoods move
+the per-call worst case improves too, ~4x near the support edge (7.6e-3 nats
+against 3.1e-2 — that residual belongs to the taper panel, which the closed
+plateau does not touch) and by six orders of magnitude over the whole prior box
+(7.4e-8 against 2.9e-1; the two-panel rule was 4.6e-2 there before the plateau
+was closed). Where the box worst case sits moved with it: it is no longer the
+steep-`beta` corner `m_min = 2`, `dm_min = 0`, `beta = -2`, `m1 = 250` — the
+closed form's H0-coherent error there is 3e-15 nats against the GL plateau's
+2.6e-3 — but a WIDE taper, `m_min = 8.42`, `dm_min = 8.67`, `beta = -0.84`,
+`m1 = 15.8`, where the residual is the taper panel's and its H0-coherent part is
+1.1e-3 nats, the same for both rules. Golden log-likelihoods move
 accordingly and were re-blessed (population registry: max 7.7e-5 nats, 1.5e-5
 relative, one-sided).
 
