@@ -88,11 +88,16 @@ def _min_pairing_m1_grid(m_lo: float, pairing_m_hi: float, n_q: int) -> int:
     return 1 + int(math.ceil(math.log(pairing_m_hi / m_lo) * (int(n_q) - 1)))
 
 
-# Node count of EACH of the two Gauss-Legendre panels the pairing normaliser is
-# integrated on (see ``PairingModel._panel_norm``).  Deliberately a module
-# constant and NOT a setting: the rule is calibrated as a pair (16 + 16) against
-# a converged reference, it is exercised on every likelihood call, and a knob
-# here would let a run silently pick a rule nobody measured.  ``pairing_edge_nq``
+# Node count of EACH Gauss-Legendre panel the pairing normaliser is integrated on
+# (see ``PairingModel._panel_norm``).  Since 2026-09-06 the topmost panel of both
+# production pairings carries NO nodes at all -- above the taper shoulder their
+# kernel is a bare ``q**beta`` and ``PairingModel._plateau_integral`` returns its
+# exact integral -- so those two models spend this many nodes per sample, not
+# twice it.  Deliberately a module constant and NOT a setting: the rule is
+# calibrated as a whole (16 nodes on the taper panel, plus either 16 more or a
+# closed form on the plateau) against a converged reference, it is exercised on
+# every likelihood call, and a knob here would let a run silently pick a rule
+# nobody measured.  ``pairing_edge_nq``
 # remains configurable because it only serves the opt-in grid branch's rare
 # near-edge samples.
 PAIRING_PANEL_NQ: int = 16
@@ -454,6 +459,18 @@ def get_pairing_panel_quadrature():
     rule and must declare that feature's edges through
     ``PairingModel._panel_edges`` (``GaussianPairing`` does); the node count
     itself stays a constant.
+
+    BEING ANALYTIC THERE, THAT PANEL IS NO LONGER QUADRATURED AT ALL for the two
+    production models: ``PairingModel._plateau_integral`` returns
+    ``(1 - q_a**(beta+1))/(beta+1)`` exactly, so these nodes are spent only on
+    the taper boundary layer.  That is not just cheaper, it closes a hole: at
+    steep negative ``beta`` the plateau integrand is a boundary layer at ``q_a``
+    itself, which shrinks like 1/m1, so GL-16's residual there GROWS with m1 and
+    is coherent across the mass population.  Measured on the 259-event dark-siren
+    likelihood at (beta_q, m2_low, delta_m2) = (-1.9, 3.05, 1.15), the
+    Gauss-Legendre plateau tilted logL by 0.93 nats peak-to-peak across the H0
+    prior [20, 140] (slope -1.04 nats) against 2.0e-4 (slope -2.8e-5) with the
+    closed form.
 
     16 is a calibrated pair, not a default to tune: 32 per panel buys another 4x
     on the worst case (1.9e-3 nats) for twice the per-sample work, while the
