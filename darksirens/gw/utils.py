@@ -566,26 +566,33 @@ def load_gw_store(gw_path, fit_columns=None) -> GWStore:
             conversion_hint=conversion_hint,
         )
         _require_store_layout(f, contract, gw_path, conversion_hint=conversion_hint)
-        _require_store_quality(f, contract, gw_path, conversion_hint=conversion_hint)
+        # One read per dataset from here on: the quality gate and the store
+        # columns below used to decompress every column again (49 full reads
+        # for the 9 selection columns, 40 for the PE ones), which is the whole
+        # cost on a gzip-compressed export.
+        columns = store_contract.read_columns(f, contract)
+        _require_store_quality(
+            columns, contract, gw_path, conversion_hint=conversion_hint
+        )
 
         nsamp = int(f.attrs["nsamp"])
         nEvents = int(f.attrs["nobs"])
 
         # Load arrays as NumPy first (safer for reshaping). gwcat stores dL
         # in Mpc and p_pe in the canonical (m1det, q, dL) basis.
-        ra = np.array(f["ra"])
-        dec = np.array(f["dec"])
-        m1det = np.array(f["m1det"])
-        m2det = np.array(f["m2det"])
-        dL = np.array(f["dL"])
-        chieff = np.array(f["chieff"])
-        p_pe = np.array(f["p_pe"])
-        m1source = np.array(f["m1src"])
-        m2source = np.array(f["m2src"])
+        ra = columns["ra"]
+        dec = columns["dec"]
+        m1det = columns["m1det"]
+        m2det = columns["m2det"]
+        dL = columns["dL"]
+        chieff = columns["chieff"]
+        p_pe = columns["p_pe"]
+        m1source = columns["m1src"]
+        m2source = columns["m2src"]
         spin_cols = {
-            name: np.array(f[name])
+            name: columns[name]
             for name in store_contract.COMPONENT_SPIN_DATASETS
-            if name in f
+            if name in columns
         }
 
         # chi_eff-compat attrs exist only on chieff-basis files; a component
@@ -790,22 +797,27 @@ def load_selection_store(file, allow_invalid_spin_swap=False,
             conversion_hint=conversion_hint,
         )
         _require_store_layout(f, contract, file, conversion_hint=conversion_hint)
-        _require_store_quality(f, contract, file, conversion_hint=conversion_hint)
+        # See load_gw_samples: read each dataset once and hand the same
+        # arrays to the quality gate and to the store columns.
+        columns = store_contract.read_columns(f, contract)
+        _require_store_quality(
+            columns, contract, file, conversion_hint=conversion_hint
+        )
 
-        m1detsels = np.array(f["m1det"])
-        m2detsels = np.array(f["m2det"])
-        dLsels = np.array(f["dL"])
-        chieffsels = np.array(f["chieff"])
-        rasels = np.array(f["ra"])
-        decsels = np.array(f["dec"])
-        pdraw_sel = np.array(f["pdraw"])
-        m1src_sel = np.array(f["m1src"])
-        m2src_sel = np.array(f["m2src"])
+        m1detsels = columns["m1det"]
+        m2detsels = columns["m2det"]
+        dLsels = columns["dL"]
+        chieffsels = columns["chieff"]
+        rasels = columns["ra"]
+        decsels = columns["dec"]
+        pdraw_sel = columns["pdraw"]
+        m1src_sel = columns["m1src"]
+        m2src_sel = columns["m2src"]
         ndraw = int(f.attrs["ndraw"])
         spin_cols = {
-            name: np.array(f[name])
+            name: columns[name]
             for name in store_contract.COMPONENT_SPIN_DATASETS
-            if name in f
+            if name in columns
         }
         attrs = _decoded_attrs(f)
         record_fit_columns = tuple(
