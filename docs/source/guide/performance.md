@@ -18,20 +18,42 @@ All numbers here: NVIDIA H100 NVL, float64, jax 0.4.34, `DARKSIRENS_ZMAX=6`, no
 XLA compilation cache, `scripts/benchmarks/bench_likelihood_call.py --n-calls
 20`, three interleaved launches per arm, medians of launch medians.
 
-| Configuration | `f770956` | this tree | Speedup | Peak device memory |
-|---|---|---|---|---|
-| 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, `zspace`-24/`ns6`, auto blocking) | 59.472 ms/call | 10.839 ms/call | 5.46x | 22.620 -> 9.923 GiB |
-| the same run on the shipped sbatch pins (`--sel_batch_size 131072 --pe_event_block 32`) | 68.829 ms/call | 22.737 ms/call | 3.03x | -> 9.923 GiB |
-| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 13.907 ms/call | 2.549 ms/call | 5.46x | 3.672 -> 0.644 GiB |
+**What the current tree costs.** One table, every number measured on the tree
+that ships:
 
-Per-launch speedups were 5.405 / 5.487 / 5.507x on the auto-blocked dark-siren
-configuration and 5.440 / 5.456 / 5.517x on the spectral one. The largest
-single device allocation on the dark-siren run falls 14.746 -> 1.185 GiB.
+| Quantity | `f770956` | this tree | Ratio |
+|---|---|---|---|
+| 259-event dark sirens, auto blocking (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, `zspace`-24/`ns6`) | 59.201 ms/call | **11.920 ms/call** | 4.97x |
+| ... its peak device memory | 22.620 GiB | **9.923 GiB** | 2.28x lower |
+| the same run on the shipped sbatch pins (`--sel_batch_size 131072 --pe_event_block 32`) | 68.396 ms/call | **23.793 ms/call** | 2.88x |
+| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 13.981 ms/call | **3.517 ms/call** | 3.98x |
+| ... its peak device memory | 3.672 GiB | **0.772 GiB** | 4.76x lower |
+| startup, cold XLA cache: data load phase (dark sirens) | 11.1-13.4 s | **4.6-4.7 s** | 2.6x |
+| startup, cold XLA cache: total setup inside a dynesty launch | 32.5 s | **24.0 s** | 1.35x |
+| the same setup with a warm `DARKSIRENS_XLA_CACHE` (opt-in, off by default, and off in every other row) | 37.2 s cold | **20.7 s warm** | 1.80x |
+| end to end, 20-event smoke under dynesty | 1.536 ms/proposal | **1.183 ms/proposal** | 1.30x |
+
+The per-call and peak-memory rows are this tree's own three-launch benchmark
+(dark sirens 10.869 -> 11.920 ms and spectral 2.594 -> 3.517 ms against the
+c625fa2 composition, which is `PAIRING_PANEL_NQ` = 16; see [the pairing
+section](#the-pairing-mass-ratio-normaliser) for why 32 is the shipped node
+count and what it buys). The startup and end-to-end rows were measured on that
+c625fa2 composition and are carried forward: the +1.05 ms/call the node count
+adds moves the end-to-end proposal figure by about the same amount and leaves
+every startup phase untouched. The largest single device allocation on the
+dark-siren run falls 14.746 -> 1.186 GiB.
+
+**None of the absolute "after" values in the sections below is the cost of this
+tree.** Each of them -- 46.6, 46.5, 46.163, 46.157, 32.2, 28.4 and 23.41 ms on
+the dark-siren configuration, 2.88, 2.562 and 2.403 ms on the spectral one --
+was measured on a tree carrying the changes that had landed up to that point,
+in the order they landed, and each is correct as the increment it states. The
+table above is the only composed number on this page.
 
 ```{warning}
 **Do not pin `--sel_batch_size` or `--pe_event_block` on this tree.** The
-shipped pins cost 1.16x on `f770956` (68.829 against 59.472 ms) and cost 2.10x
-here (22.737 against 10.839 ms), and they no longer buy any memory headroom:
+shipped pins cost 1.16x on `f770956` (68.396 against 59.201 ms) and cost 2.00x
+here (23.793 against 11.920 ms), and they no longer buy any memory headroom:
 peak device memory is 9.923 GiB with auto blocking and 9.923 GiB with the pins.
 `experiments/desi_full259/sbatch_ns_joint_sel.sh` still carries them.
 ```
@@ -77,7 +99,7 @@ redshift-grid bracket are bit-identical by construction and measure 2.6e-09
 nats or less in situ.
 
 The other two are one rule change, the pairing mass-ratio normaliser: the
-200-node q-trapezoid becomes two 16-node Gauss-Legendre panels, and the upper
+200-node q-trapezoid becomes two 32-node Gauss-Legendre panels, and the upper
 panel then becomes a closed form. It reaches BOTH configurations -- `powerlaw+peak`'s `beta`
 goes through the same normaliser -- so the spectral likelihood is not
 bit-identical against `f770956` either (up to 1.582 nats at the benchmark
@@ -89,33 +111,34 @@ cross-checked against a 1024-node composite to 3.0e-09 nats), scanning `H0` over
 
 | Configuration and coordinate | 200-node trapezoid (`f770956`) | this tree |
 |---|---|---|
-| production, fiducial | 2.007e-01 nats ptp, -1.013e-01 slope x prior width | 1.089e-03 nats ptp |
-| production, worst of 13 corner coordinates | 3.7339e+03 nats at (`beta_q`, `m2_low`, `delta_m2`) = (-1.95, 3.05, 0.05) | 6.978e-02 nats at (-1.95, 3.05, 9.50), +6.26e-02 nats slope x prior width |
-| production, 25-point (`beta_q`, `delta_m2`) map at `m2_low` = 3.05 | 24 of 25 coordinates over 0.05 nats | 4 of 25 over, worst 1.1584e-01 at (-1.95, 8.00) |
-| spectral, 12 corner coordinates | worst 1.0367e+02 nats | worst 1.651e-03 nats |
-| spectral, 40 map coordinates | -- | worst 9.61e-04 nats |
+| production, fiducial | 2.007e-01 nats ptp, -1.013e-01 slope x prior width | 3.173e-07 nats ptp |
+| production, worst of 13 corner coordinates | 3.7339e+03 nats at (`beta_q`, `m2_low`, `delta_m2`) = (-1.95, 3.05, 0.05); 11 of 13 over 0.05 nats | **5.164e-06 nats** at (-1.95, 3.05, 9.50); 0 of 13 over |
+| production, 25-point (`beta_q`, `delta_m2`) map at `m2_low` = 3.05 | 24 of 25 coordinates over 0.05 nats, worst 3.094e+00 | **8.498e-06 nats** worst, at (-1.95, 8.00); 0 of 25 over |
+| spectral, 12 corner coordinates | worst 1.0367e+02 nats; 7 of 12 over | **8.453e-06 nats** worst; 0 of 12 over |
 
-So the pairing rule is a correction of about four orders of magnitude
-everywhere it was measured, and the shipped trapezoid was far outside the
-0.05-nat tilt budget across most of the prior box, not only at its corners. Any
-posterior produced with the old normaliser carries that tilt wherever the chain
-visited a narrow or a wide secondary-mass taper.
+Nothing anywhere on this scan exceeds 1e-05 nats, against a 0.05-nat budget:
+the pairing rule is a correction of four to nine orders of magnitude everywhere
+it was measured, and the shipped trapezoid was far outside the budget across
+most of the prior box, not only at its corners. Any posterior produced with the
+old normaliser carries that tilt wherever the chain visited a narrow or a wide
+secondary-mass taper.
 
-```{warning}
-The residual is not everywhere under budget. At low `m2_low` with a wide taper
-and a steep negative `beta_q` -- a band, not a point -- this tree still tilts
-the 259-event production log-likelihood by 7.0e-02 to 1.2e-01 nats across the
-`H0` prior, above the 0.05-nat budget. The residual belongs to the GL-16 rule
-on the TAPER panel, not to the closed plateau: raising `PAIRING_PANEL_NQ` from
-16 to 32 collapses the worst corner from 6.978e-02 to 5.164e-06 nats and the
-worst map point from 1.1584e-01 to 8.498e-06, for +0.847 ms/call (10.844 ->
-11.692 ms, 1.078x) and no change in peak device memory. That constant does not
-stand alone: `pairing_edge_nq`'s default (24) must rise with it or
-`NormalizationGridSettings` refuses the configuration at import, and
+```{note}
+**Why the panels carry 32 nodes and not 16.** At 16 -- the count this campaign
+first shipped -- the same scan put the worst production corner at 6.978e-02
+nats and four of those 25 map points over the 0.05-nat budget, worst 1.1584e-01
+at (`beta_q`, `delta_m2`) = (-1.95, 8.00). The residual belonged entirely to
+the TAPER panel, not to the closed plateau: below the taper shoulder the whole
+`q`-support sits inside the Planck taper, the plateau panel has zero width, and
+what GL-16 leaves there is coherent across the mass population, so it tilts
+with `H0` instead of averaging out. Raising `PAIRING_PANEL_NQ` to 32 collapsed
+the worst corner by 13,500x and the worst map point by 14,000x, for +1.05
+ms/call on the dark-siren configuration (10.869 -> 11.920 ms) and +0.92 ms on
+the spectral one (2.594 -> 3.517 ms), with peak device memory unchanged at
+9.923 GiB and 0.644 -> 0.772 GiB. The constant does not stand alone:
+`pairing_edge_nq`'s default rose 24 -> 48 with it (`NormalizationGridSettings`
+refuses a value below `PAIRING_PANEL_NQ` at import) and
 `scripts/mock_dark_sirens/generate_mock_data.py` mirrors the same node count.
-For scale, every coordinate measured over budget sits 1.3e5 to 3.0e5 nats below
-the best point on the same scan, with the other 17 labels pinned at their
-fiducials.
 ```
 
 ## What one likelihood call costs
@@ -304,6 +327,10 @@ process after those eight draws, falls from 22.6-24.3 GB to 12.2-13.1 GB
 calls preceded the read, the ratio does not). The spectral configuration has no
 catalog KDE and is unchanged (13.9 against 14.0 ms, bit-identical).
 
+*Historical increment: measured on the tree this change landed on, not on the
+tree that ships. Composed, the dark-siren call costs 11.920 ms and the spectral
+one 3.517 ms -- see [Campaign 2026-09-05](#campaign-2026-09-05).*
+
 The two leaves are BUILD-time, not per-call. Under the `H0` kernel pin (the
 configuration benchmarked above) they are lifted straight off the pinned
 quadrature and the only per-proposal work is one `(N_rows,)` add. When the pin
@@ -388,6 +415,10 @@ sample set (`idx_occ` and `idx_empty` partition the set, plus `inv_order`), 17.0
 MB across both, and the narrower KDE intermediate more than pays for it. The
 spectral configuration has no catalog KDE and cannot reach this path.
 
+*Historical increment: measured on the tree this change landed on, not on the
+tree that ships. Composed, the dark-siren call costs 11.920 ms and the spectral
+one 3.517 ms -- see [Campaign 2026-09-05](#campaign-2026-09-05).*
+
 On accuracy the routing is exact where it can be and ulp-level where it cannot.
 The prior vector it returns is bit-identical to the plain path sample by sample
 and slot by slot, and on the production build the whole log-likelihood is too:
@@ -438,6 +469,10 @@ session: 23.41 ms/call against 28.04 ms with the ladder refused (1.20x), and
 whole catalog resident, and only per-tier ROW compaction -- which would have to
 move every row-indexed leaf coherently -- could shrink the tables. The spectral
 configuration has no catalog KDE and cannot reach this path.
+
+*Historical increment: measured on the tree this change landed on, not on the
+tree that ships. Composed, the dark-siren call costs 11.920 ms and the spectral
+one 3.517 ms -- see [Campaign 2026-09-05](#campaign-2026-09-05).*
 
 The class is ulp-level, not bit-identical. Each tier evaluates exactly the same
 galaxies as the full row, so the real number the reduction represents is
@@ -552,10 +587,14 @@ The conditional pairing density `p(q | m1)` is normalised per sample,
 `N(m1) = int_{q_cut}^{1} p(q | m1) dq` with `q_cut = m_min/m1`, twice per
 likelihood call (once on the PE set, once on the injections). Until 2026-09-05
 that integral was a 200-node uniform trapezoid on the support-relative interval,
-i.e. 200 density evaluations per sample; it is now **two 16-node Gauss-Legendre
-panels split at the taper shoulder** `q_a = (m_min + dm_min)/m1`, i.e. 32.
+i.e. 200 density evaluations per sample; it is now **two Gauss-Legendre panels
+split at the taper shoulder** `q_a = (m_min + dm_min)/m1`, carrying
+`PAIRING_PANEL_NQ` = 32 nodes each. (The tables in this section were measured
+at 16 per panel, which is what this change shipped with; see
+[Campaign 2026-09-05](#campaign-2026-09-05) for why the count is now 32 and
+what the extra nodes cost.)
 
-The split is what makes 32 nodes beat 200. Below `q_a` the integrand is the
+The split is what makes a few dozen nodes beat 200. Below `q_a` the integrand is the
 Planck-taper boundary layer, above it the bare pairing kernel (`q**beta`) with
 the taper identically one, so the combined integrand has a corner at `q_a` that
 neither piece has. Gauss-Legendre resolves each smooth piece; a single rule
@@ -567,21 +606,21 @@ Being bare above the shoulder, that upper panel is **not quadratured at all**
 for either production pairing: `PairingModel._plateau_integral` returns
 `int_{q_a}^{1} q**beta dq = (1 - q_a**(beta+1))/(beta+1)` (the `beta -> -1` limit
 `-log q_a` is a live branch — `beta` is sampled over `[-2, 7]`), so those models
-spend 16 nodes per sample, not 32, and the remaining nodes all sit in the
-boundary layer. A pairing without an analytic plateau — `GaussianPairing`, or
+spend `PAIRING_PANEL_NQ` nodes per sample rather than twice that, and every one
+of them sits in the boundary layer. A pairing without an analytic plateau — `GaussianPairing`, or
 any out-of-tree model — does not implement the hook and keeps the
 Gauss-Legendre panel unchanged.
 
-Sixteen nodes per panel are calibrated for a `q**beta` kernel — what both
-production pairings are above the shoulder. A pairing model whose kernel carries
-a feature *narrower than a panel* is not resolved by any fixed 16-node rule and
+The node count is calibrated for a `q**beta` kernel — what both production
+pairings are above the shoulder. A pairing model whose kernel carries
+a feature *narrower than a panel* is not resolved by any fixed-node rule and
 must declare that feature's edges through `PairingModel._panel_edges`, which
 buys it one extra panel per edge; `GaussianPairing` (not grammar-registered, but
 public API) declares `mu_q ± 5 sigma_q` and is 27 nats off without them.
 
 There is **no flag**: the node count is a module constant
-(`darksirens.gw.populations.utils.PAIRING_PANEL_NQ`), calibrated as a pair
-against a converged reference and exercised on every call. In particular
+(`darksirens.gw.populations.utils.PAIRING_PANEL_NQ`), calibrated against a
+converged reference on the end-to-end likelihood and exercised on every call. In particular
 `--norm_nq` / `DARKSIRENS_GW_N_Q` no longer changes this quadrature — it still
 sizes `get_q_grid()` (the GP baselines and the stratified-q tables) and is still
 what the block-size resolver reads, so blocking plans are unchanged.
@@ -594,6 +633,10 @@ Measured on this repository at `f770956` on an NVIDIA H100 NVL, float64,
 | 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 13.90 ms/call | 2.88 ms/call | 4.83x | 3.672 -> 0.640 GiB |
 | 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 59.2 ms/call | 46.6 ms/call | 1.27x | 22.620 -> 22.620 GiB |
 | the same run on the shipped sbatch pins (`--sel_batch_size 131072 --pe_event_block 32`) | 68.2 ms/call | 55.1 ms/call | 1.24x | 10.598 -> 10.599 GiB |
+
+*Historical increment: measured on the tree this change landed on, not on the
+tree that ships. Composed, the dark-siren call costs 11.920 ms and the spectral
+one 3.517 ms -- see [Campaign 2026-09-05](#campaign-2026-09-05).*
 
 `Before` is master `f770956`, `After` the head of this change. The pinned row
 was re-measured for that head with both arms interleaved in one lock hold
@@ -619,8 +662,8 @@ the peak device memory falls 5.7x there and does not move at all on the
 auto-blocked dark-siren configuration, whose blocking is unchanged.
 
 That guidance is reversed on the composed 2026-09-05 tree: with the catalog-KDE
-changes in place the pins cost 2.10x rather than buying memory (22.737 against
-10.839 ms/call, 9.923 GiB either way). See
+changes in place the pins cost 2.00x rather than buying memory (23.793 against
+11.920 ms/call, 9.923 GiB either way). See
 [Campaign 2026-09-05](#campaign-2026-09-05).
 
 Accuracy is a **correction**, not a regression. Against a converged
@@ -661,8 +704,8 @@ self-average over the mass population, so it tilts with `H0`
 H0-correlated systematic of -0.10 nats is the reason this change is admissible;
 the per-call worst case improves too, ~4x near the support edge (7.6e-3 nats
 against 3.1e-2 — that residual belongs to the taper panel, which the closed
-plateau does not touch) and by six orders of magnitude over the whole prior box
-(7.4e-8 against 2.9e-1; the two-panel rule was 4.6e-2 there before the plateau
+plateau does not touch) and by four orders of magnitude over the whole prior box
+(1.1e-3 against 2.9e-1; the two-panel rule was 4.6e-2 there before the plateau
 was closed). Where the box worst case sits moved with it: it is no longer the
 steep-`beta` corner `m_min = 2`, `dm_min = 0`, `beta = -2`, `m1 = 250` — the
 closed form's H0-coherent error there is 3e-15 nats against the GL plateau's
@@ -672,12 +715,16 @@ closed form's H0-coherent error there is 3e-15 nats against the GL plateau's
 accordingly and were re-blessed (population registry: max 7.7e-5 nats, 1.5e-5
 relative, one-sided).
 
-Read that prior-box figure as a bound on the sample it was taken over, not on
-the box. It comes from a 60-point log-spaced `m1` grid that steps over the
-narrow band just above `m_min`, where a 4000-point grid measures 5.2e-3 nats at
-the same coordinate; end to end that band is what
-[Campaign 2026-09-05](#campaign-2026-09-05) records as this tree's remaining
-7.0e-02 to 1.2e-01 nat `H0` tilt at low `m2_low`, above the 0.05-nat budget.
+That prior-box figure used to read 7.4e-8, and it was a bound on the sample it
+was taken over rather than on the box: it came from a 60-point log-spaced `m1`
+grid whose coarsest cells just above `m_min` are ~8% wide, while the
+taper-panel residual peaks at `m1/m_min ~ 1.02`. End to end that band was
+what tilted the production likelihood by 7.0e-02 to 1.2e-01 nats at low
+`m2_low`. `tests/test_pairing_panel_quadrature.py` now refines the grid there
+and draws its `H0`-tilt population down to the mass floor, so both of its
+bounds fail at 16 nodes per panel and pass at 32; the 1.1e-3 above is what the
+repaired probe measures on the shipped rule, at `m_min = 2`, `dm_min = 10`,
+`beta = 0`, `m1 = 2.08`.
 
 ## The luminosity-distance inversion
 
@@ -712,6 +759,10 @@ quantity this design resolves:
 |---|---|---|---|---|---|
 | 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 2.778 ms/call | 2.403 ms/call | -0.375 ± 0.016 ms | 1.16x | 0.640 -> 0.644 GiB |
 | 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 46.453 ms/call | 46.163 ms/call | -0.290 ± 0.052 ms | 1.006x | 22.620 -> 22.637 GiB |
+
+*Historical increment: measured on the tree this change landed on, not on the
+tree that ships. Composed, the dark-siren call costs 11.920 ms and the spectral
+one 3.517 ms -- see [Campaign 2026-09-05](#campaign-2026-09-05).*
 
 Per-launch medians were 2.572 / 2.872 / 2.891 ms against 2.167 / 2.519 / 2.523
 ms on the spectral configuration and 46.439 / 46.502 / 46.419 ms against 46.208
@@ -774,6 +825,10 @@ launch-paired difference:
 |---|---|---|---|---|---|
 | 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 46.496 ms/call | 46.157 ms/call | -0.340 ± 0.055 ms | 1.007x | 24.306 -> 24.292 GB |
 | 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 2.560 ms/call | 2.562 ms/call | +0.002 ms | 1.00x | 0.691 -> 0.691 GB |
+
+*Historical increment: measured on the tree this change landed on, not on the
+tree that ships. Composed, the dark-siren call costs 11.920 ms and the spectral
+one 3.517 ms -- see [Campaign 2026-09-05](#campaign-2026-09-05).*
 
 The spectral row is a null by construction: `spectral_sirens` interpolates the
 volume element with `log_interp_zgrid`, which already carried the closed form,
