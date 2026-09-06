@@ -277,7 +277,10 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
     ``n_sigma=6`` the kernel mass a covered sample can miss is < 2e-9 per
     galaxy, comfortably inside the 1e-6 |delta log p_cat| validation bar.
     Host-side numpy diagnostic -- run once per catalog when sizing W, not in
-    the hot path.
+    the hot path.  Raises ``ValueError`` unless ``ngals`` carries exactly one
+    count per ``zgals`` row: the scan visits rows in count order rather than in
+    storage order, so a short ``ngals`` would size the window from a prefix of
+    the catalog instead of failing.
 
     The one-sided rule is what lets the evaluator locate a window with ONE
     binary search (the insertion index) instead of three (the block's two
@@ -290,11 +293,27 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
     dz = np.asarray(dzgals)
     if z.ndim != 2:
         raise ValueError("zgals must be (N_rows, N_max)")
+    if ng.ndim != 1 or ng.shape[0] != z.shape[0]:
+        # The scan no longer walks range(z.shape[0]), so a short ``ngals`` would
+        # silently size the window from a PREFIX of the catalog instead of
+        # raising: refuse it here, as the auto_kde_window widths check does.
+        raise ValueError(
+            f"ngals must be (N_rows,) matching zgals: got {ng.shape} "
+            f"for zgals {z.shape}"
+        )
     worst = 0
-    for r in range(z.shape[0]):
+    # Rows in DESCENDING count order with an exact early exit.  A row with n
+    # real galaxies has right[j] <= n - j and left[j] <= j + 1, so one_sided
+    # <= n and the row contributes at most 2n to the max: once ``worst`` has
+    # reached 2n for the largest remaining n, no unvisited row can raise it.
+    # This is a pure visitation-order prune -- the returned max is unchanged.
+    order = np.argsort(-np.asarray(ng, dtype=np.int64), kind="stable")
+    for r in order:
         n = int(ng[r])
         if n < 1:
-            continue
+            break                      # descending: every remaining row is empty
+        if 2 * n <= worst:
+            break                      # every remaining row has n' <= n
         zr = np.sort(z[r, :n])
         sig_max = float(
             np.max(np.sqrt(dz[r, :n] ** 2 + float(sigma_kde_max) ** 2))
@@ -498,6 +517,9 @@ def auto_kde_window(catalogs, sigma_kde_max, n_sigma=None, granule=64):
     if n_sigma is None:
         n_sigma = _KDE_WINDOW_NSIGMA
     worst = None
+    seen_ids = set()
+    pinned = []                            # keep scanned arrays alive so no
+                                           # freed view can recycle an id()
     for cat in catalogs:
         zgals = getattr(cat, "zgals", None)
         ngals = getattr(cat, "ngals", None)
@@ -510,6 +532,16 @@ def auto_kde_window(catalogs, sigma_kde_max, n_sigma=None, granule=64):
                 "(zgals) but no widths (dzgals); the window cannot be sized "
                 "for it and it would be evaluated under another view's window."
             )
+        # Aliased views (the flat-union path binds the SAME arrays to the PE
+        # and selection views) scan identically; the result is a max over
+        # views, so a repeat contributes nothing.  Identity only -- these are
+        # hundreds of MB.  The dzgals refusal above already fired for THIS
+        # view, so dedup cannot swallow a mis-specified one.
+        view_key = (id(zgals), id(ngals), id(dzgals))
+        if view_key in seen_ids:
+            continue
+        seen_ids.add(view_key)
+        pinned.append((zgals, ngals, dzgals))
         if ngals is None:                  # no counts: every slot is a galaxy
             ngals = np.full(zgals.shape[0], zgals.shape[1], dtype=np.int64)
         need = recommended_kde_window(
