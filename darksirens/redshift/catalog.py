@@ -1459,11 +1459,66 @@ def _logsumexp_neginf_safe(terms):
     return jnp.where(jnp.any(finite), logsumexp(safe), -jnp.inf)
 
 
+def _validate_col_cap(em_catalog, state, use_window, col_cap: int) -> int:
+    """Refuse a narrowed column view that would not be the SAME estimator.
+
+    A ``col_cap`` view evaluates the row prefix ``[0, col_cap)`` instead of the
+    whole padded row.  That is exact -- and only exact -- when every LIVE slot
+    of every row this view is used for sits below the cap, so that the slots
+    dropped are padding whose ``exp(-1e30 - m)`` is already exactly ``0.0`` in
+    the full-row sum.  The caller owns the per-row half of that promise (which
+    rows may use which cap); this function owns the two halves that are
+    properties of the ARRAYS and of the BRANCH, and it raises rather than
+    falling back, because a silent fallback here is a silent estimator swap.
+
+    ``use_window`` is the branch half and the one the merged candidate record
+    left out entirely.  The windowed branch is a DIFFERENT estimator -- it keeps
+    the ``window`` galaxies nearest ``z`` and drops the rest, an approximation
+    worth up to 0.28 nats per sample on this DESI catalog -- and it arms on
+    ``em_catalog.zgals.shape[1] > window`` (plus an attested row SHAPE).  A
+    narrowed view is neither, so windowing would silently switch off for the
+    narrow tiers and on for the wide ones: two estimators inside one A/B, and
+    the difference is a function of ``z``, hence of ``H0``.  Tiering is
+    therefore refused outright whenever windowing is armed on the untiered
+    shape; the production configuration is clear of this by sizing (auto window
+    3456 > n_max 1719, so windowing never arms), and a ``--kde_window`` run
+    below ``n_max`` gets the untiered graph.
+    """
+    zgals = getattr(em_catalog, "zgals", None)
+    if getattr(zgals, "ndim", 0) != 2:
+        raise ValueError(
+            "col_cap requires a 2-D (N_rows, N_max) catalog view; got ndim="
+            f"{getattr(zgals, 'ndim', None)}"
+        )
+    if em_catalog.ngals is None:
+        # ``_row_real_mask`` falls back to ``ws > 0``, which is NOT a prefix, so
+        # nothing proves the dropped columns are padding.
+        raise ValueError(
+            "col_cap requires em_catalog.ngals (the row-prefix invariant that "
+            "makes a column slice exact); this view has none"
+        )
+    if use_window:
+        raise ValueError(
+            "col_cap is incompatible with the windowed KDE branch: the window "
+            "is a different (truncating) estimator, and a narrowed view would "
+            "silently take the full-row branch instead.  Disable windowing or "
+            "do not tier."
+        )
+    n_cols = int(zgals.shape[1])
+    cap = int(col_cap)
+    if not 1 <= cap <= n_cols:
+        raise ValueError(
+            f"col_cap must lie in [1, {n_cols}], got {cap}"
+        )
+    return cap
+
+
 def eval_log_catalog_prior_state(
     z: float,
     pix: int,
     state: CatalogKernelState,
     em_catalog: EMCatalog,
+    col_cap: int | None = None,
 ) -> float:
     """
     log p_cat(z | pix) using a precomputed ``CatalogKernelState``.
@@ -1496,6 +1551,26 @@ def eval_log_catalog_prior_state(
     is violated, so such a replay is loud instead of plausible.  Attest every
     view you bind (:func:`attest_rows_sorted_for_windowing`), or disable
     windowing with ``configure_catalog_kde_window(size=None)``.
+
+    ``col_cap`` narrows the full-row gathers to the STATIC column prefix
+    ``[0, col_cap)`` of the resident arrays -- ``a[pix, :col_cap]``, one gather
+    with a narrower slice size, no new buffer and no row relabelling.  It is
+    the width half of the row-width tiering
+    (:class:`darksirens.redshift.prior.WidthTier`): the caller partitions its
+    SAMPLES by ``ngals[pix]`` and calls this evaluator once per tier at that
+    tier's cap, so a sample whose pixel holds 300 galaxies stops reading 1719
+    slots.  Exact by the padding sentinel -- every dropped slot carries
+    ``log_kw_eff = -1e30``, whose ``exp(-1e30 - m)`` is already exactly ``0.0``
+    in the full-row sum -- but the reduction LENGTH changes, so XLA may pair the
+    real terms differently and the result is ulp-level, not bit-identical
+    (MEASURED on the production DESI nside-64 catalog: max
+    ``|dlog p_cat| = 5.68e-14`` nats, H0 slope 6.6e-15 nats per km/s/Mpc across
+    the whole [20, 140] prior).  The offset ``log_kw_eff_rowmax`` stays the
+    FULL-row maximum: it is still a valid offset for a subset (a subset's own
+    maximum can only be lower) and recomputing it per tier would push terms
+    toward the one-pass underflow edge for nothing.
+    :func:`_validate_col_cap` refuses every combination under which the slice
+    would not be the same estimator.
     """
     window = _effective_kde_window(getattr(state, "kde_window", None))
     use_window = (
@@ -1516,6 +1591,8 @@ def eval_log_catalog_prior_state(
     # ONE int32 row index for every use below (the windowed dynamic slice, the
     # full-row gathers, the row-max offset and the empty-row select).
     pix_i = jnp.asarray(pix, dtype=jnp.int32)
+    if col_cap is not None:
+        col_cap = _validate_col_cap(em_catalog, state, use_window, col_cap)
     if use_window:
         n_real = em_catalog.ngals[pix_i]
         start = _sorted_row_window_start(
@@ -1528,6 +1605,13 @@ def eval_log_catalog_prior_state(
         # even for all-padding windows.
         def _gather(a):
             return lax.dynamic_slice(a, (pix_i, start), (1, window))[0]
+    elif col_cap is not None and col_cap < int(em_catalog.zgals.shape[1]):
+        # Static column prefix of the RESIDENT array: under the caller's vmap
+        # this is one gather whose slice size is (1, col_cap) instead of
+        # (1, N_max), so it moves fewer bytes rather than materialising a
+        # narrowed copy of the catalog.
+        def _gather(a):
+            return a[pix_i, :col_cap]
     else:
         def _gather(a):
             return a[pix_i]
