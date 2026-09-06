@@ -530,11 +530,60 @@ def test_descending_scan_early_exit_is_bit_identical_to_the_full_scan(sigma_kde_
     assert got == want
 
 
+def _two_row_loose_bound_fixture():
+    """A catalog whose maximum comes from a row that a LOOSE break would skip.
+
+    Row 0 holds 10 galaxies one unit apart at needle-thin widths, so its
+    one-sided count is 1 and it contributes 2.  Row 1 holds 2 COINCIDENT
+    galaxies, one-sided 2, contributing 4.  Scanned in descending count order
+    row 1 is reached with ``worst == 2``, and only the sound threshold
+    ``2 * n <= worst`` (4 <= 2, false) still visits it; the loose
+    ``n <= worst`` (2 <= 2, true) stops there and returns 2 -- a window half
+    the size the catalog needs.
+    """
+    zg = np.zeros((2, 10))
+    dz = np.full((2, 10), 1e-6)
+    zg[0, :10] = np.arange(10, dtype=float)
+    zg[1, :2] = 0.5
+    ng = np.array([10, 2], dtype=np.int32)
+    return zg, ng, dz
+
+
+def test_break_threshold_is_twice_the_row_count_not_the_row_count():
+    """Pins the admissibility predicate the bit-identity argument rests on."""
+    zg, ng, dz = _two_row_loose_bound_fixture()
+    want = _brute_recommended_kde_window(zg, ng, dz, 0.0, 6.0)
+    assert want == 4                       # the coincident pair sets the max
+    assert C.recommended_kde_window(zg, ng, dz, 0.0, n_sigma=6.0) == want
+    # The densest row alone would give 2: the prune must NOT stop at it.
+    assert _brute_recommended_kde_window(
+        zg[:1], ng[:1], dz[:1], 0.0, 6.0) == 2
+
+
 def test_recommended_kde_window_is_empty_and_all_zero_safe():
     zg = np.zeros((0, 5)); dz = np.zeros((0, 5)); ng = np.zeros((0,), dtype=np.int32)
     assert C.recommended_kde_window(zg, ng, dz, 0.01) == 0
     zg = np.zeros((3, 5)); dz = np.ones((3, 5)); ng = np.zeros((3,), dtype=np.int32)
     assert C.recommended_kde_window(zg, ng, dz, 0.01) == 0
+    # Trailing empty rows end the descending scan; the answer is unchanged.
+    zg2, ng2, dz2 = _two_row_loose_bound_fixture()
+    zg3 = np.concatenate([zg2, np.zeros((4, 10))])
+    dz3 = np.concatenate([dz2, np.full((4, 10), 1e-6)])
+    ng3 = np.concatenate([ng2, np.zeros(4, dtype=np.int32)])
+    assert C.recommended_kde_window(zg3, ng3, dz3, 0.0, n_sigma=6.0) == 4
+
+
+def test_recommended_kde_window_refuses_a_mismatched_ngals():
+    """Counts are read by row index, so a short ngals must fail, not truncate."""
+    zg, ng, dz = _two_row_loose_bound_fixture()
+    with pytest.raises(ValueError, match="ngals must be"):
+        C.recommended_kde_window(zg, ng[:1], dz, 0.0, n_sigma=6.0)
+    with pytest.raises(ValueError, match="ngals must be"):
+        C.recommended_kde_window(zg, np.array([], dtype=np.int32), dz, 0.0)
+    with pytest.raises(ValueError, match="ngals must be"):
+        C.recommended_kde_window(zg, np.array(10), dz, 0.0)
+    with pytest.raises(ValueError, match="ngals must be"):
+        C.recommended_kde_window(zg, ng.reshape(2, 1), dz, 0.0)
 
 
 def test_auto_kde_window_dedups_aliased_views_without_changing_the_answer(monkeypatch):
@@ -562,8 +611,13 @@ def test_auto_kde_window_dedups_aliased_views_without_changing_the_answer(monkey
     assert len(calls) == 2
 
 
-def test_dedup_does_not_swallow_the_missing_widths_refusal():
-    """The dzgals refusal fires per VIEW, before the dedup can drop it."""
+def test_a_view_missing_widths_is_refused_wherever_it_sits():
+    """A widths-less view is refused whatever its position in the list.
+
+    Not an ordering pin on the dedup: the key carries ``id(dzgals)``, so a
+    ``dzgals=None`` view can never collide with one that carries widths and the
+    refusal would fire on its first occurrence even if the dedup ran first.
+    """
     from types import SimpleNamespace
     cat = _rows()
     zg, dz, ng = np.asarray(cat.zgals), np.asarray(cat.dzgals), np.asarray(cat.ngals)

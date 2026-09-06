@@ -277,7 +277,10 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
     ``n_sigma=6`` the kernel mass a covered sample can miss is < 2e-9 per
     galaxy, comfortably inside the 1e-6 |delta log p_cat| validation bar.
     Host-side numpy diagnostic -- run once per catalog when sizing W, not in
-    the hot path.
+    the hot path.  Raises ``ValueError`` unless ``ngals`` carries exactly one
+    count per ``zgals`` row: the scan visits rows in count order rather than in
+    storage order, so a short ``ngals`` would size the window from a prefix of
+    the catalog instead of failing.
 
     The one-sided rule is what lets the evaluator locate a window with ONE
     binary search (the insertion index) instead of three (the block's two
@@ -290,9 +293,15 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
     dz = np.asarray(dzgals)
     if z.ndim != 2:
         raise ValueError("zgals must be (N_rows, N_max)")
+    if ng.ndim != 1 or ng.shape[0] != z.shape[0]:
+        # The scan no longer walks range(z.shape[0]), so a short ``ngals`` would
+        # silently size the window from a PREFIX of the catalog instead of
+        # raising: refuse it here, as the auto_kde_window widths check does.
+        raise ValueError(
+            f"ngals must be (N_rows,) matching zgals: got {ng.shape} "
+            f"for zgals {z.shape}"
+        )
     worst = 0
-    if ng.size == 0:
-        return worst
     # Rows in DESCENDING count order with an exact early exit.  A row with n
     # real galaxies has right[j] <= n - j and left[j] <= j + 1, so one_sided
     # <= n and the row contributes at most 2n to the max: once ``worst`` has
@@ -302,7 +311,7 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
     for r in order:
         n = int(ng[r])
         if n < 1:
-            continue
+            break                      # descending: every remaining row is empty
         if 2 * n <= worst:
             break                      # every remaining row has n' <= n
         zr = np.sort(z[r, :n])
