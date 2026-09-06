@@ -244,3 +244,141 @@ def test_preflight_accepts_the_well_formed_selection_file(tmp_path):
     path = _write_selection(tmp_path / "sel_preflight_ok.h5")
     report = file_contract.validate_selection_inputs(path)
     assert report["ok"], report["errors"]
+
+
+# ----------------------------------------------------------------------------
+# Read-once: the gates must cost metadata, not decompression (perf C21).
+#
+# The production selection store is gzip-compressed (10 columns x 1.07e6 f64),
+# so every full-column read is a real decompression at ~42 ms.  The layout
+# gates need only a shape, and the quality gate plus the loader need the data
+# ONCE; the pre-C21 code read the nine selection columns 49 times in total.
+# These pins keep the counts at their post-fix values -- they are the only
+# thing standing between the file and a silent return to five reads a column.
+# ----------------------------------------------------------------------------
+class _CountingDataset:
+    """An h5py.Dataset facade that counts every materialisation."""
+
+    def __init__(self, dataset, counter, name):
+        self._dataset = dataset
+        self._counter = counter
+        self._name = name
+
+    @property
+    def shape(self):
+        return self._dataset.shape
+
+    def __array__(self, dtype=None):
+        self._counter[self._name] = self._counter.get(self._name, 0) + 1
+        arr = np.asarray(self._dataset)
+        return arr if dtype is None else arr.astype(dtype)
+
+
+class _CountingFile:
+    def __init__(self, f, counter):
+        self._f = f
+        self._counter = counter
+
+    def __getitem__(self, name):
+        return _CountingDataset(self._f[name], self._counter, name)
+
+    def __contains__(self, name):
+        return name in self._f
+
+    def __iter__(self):
+        return iter(self._f)
+
+    def __getattr__(self, key):
+        return getattr(self._f, key)
+
+
+def test_layout_gates_read_shapes_not_data(tmp_path):
+    """layout_problems and common_length must touch no bytes."""
+    path = _write_selection(tmp_path / "sel_shapes.h5")
+    counter = {}
+    contract = store_contract.contract_for("gwcat-selection-2.0", "chieff")
+    with h5py.File(path, "r") as raw:
+        f = _CountingFile(raw, counter)
+        assert store_contract.layout_problems(f, contract) == []
+        assert store_contract.common_length(f, contract) == _SEL_N
+    assert counter == {}
+
+
+def test_zero_dimensional_column_is_still_reported_as_a_shape_problem(tmp_path):
+    """A scalar dataset has no length; it must fail as the shape problem."""
+    path = _write_pe(tmp_path / "pe_scalar.h5", overrides={"ra": np.float64(0.25)})
+    with pytest.raises(RuntimeError) as excinfo:
+        load_gw_store(path)
+    msg = str(excinfo.value)
+    assert "dataset 'ra' has shape ()" in msg
+    assert "one-dimensional" in msg
+
+
+def test_read_columns_reads_each_dataset_once_and_matches_the_file(tmp_path):
+    extra = {name: np.linspace(0.0, 0.9, _N)
+             for name in store_contract.COMPONENT_SPIN_DATASETS}
+    path = _write_pe(tmp_path / "pe_readonce.h5", extra=extra)
+    counter = {}
+    contract = store_contract.contract_for("gwcat-pe-2.0", "chieff")
+    with h5py.File(path, "r") as raw:
+        columns = store_contract.read_columns(_CountingFile(raw, counter), contract)
+        # every contract dataset plus the optional component spins, once each
+        assert set(counter) == set(contract.datasets) | set(
+            store_contract.COMPONENT_SPIN_DATASETS
+        )
+        assert set(counter.values()) == {1}
+        for name in counter:
+            assert np.array_equal(columns[name], np.asarray(raw[name]))
+        # the view still answers the file's attrs, so quality_problems --
+        # which reads sky_position_available -- runs on it unchanged
+        assert dict(columns.attrs) == dict(raw.attrs)
+        assert store_contract.quality_problems(
+            columns, contract
+        ) == store_contract.quality_problems(raw, contract)
+
+
+def test_read_columns_skips_absent_datasets(tmp_path):
+    """A missing column must reach the gate that owns its error, not KeyError."""
+    path = _write_selection(tmp_path / "sel_readonce.h5")
+    contract = store_contract.contract_for("gwcat-selection-2.0", "chieff")
+    with h5py.File(path, "r") as raw:
+        columns = store_contract.read_columns(raw, contract)
+    assert "a1" not in columns
+    assert store_contract.layout_problems(columns, contract) == []
+    assert store_contract.common_length(columns, contract) == _SEL_N
+
+
+def _load_with_read_counts(monkeypatch, loader, path):
+    """Run a loader with every dataset materialisation counted."""
+    from darksirens.gw import utils as gw_utils
+
+    counter = {}
+    real_file = h5py.File
+
+    class _Shim:
+        class File:
+            def __init__(self, *args, **kwargs):
+                self._f = real_file(*args, **kwargs)
+
+            def __enter__(self):
+                return _CountingFile(self._f.__enter__(), counter)
+
+            def __exit__(self, *exc):
+                return self._f.__exit__(*exc)
+
+    monkeypatch.setattr(gw_utils, "h5py", _Shim)
+    return loader(path), counter
+
+
+def test_loaders_read_each_dataset_at_most_once(tmp_path, monkeypatch):
+    pe_path = _write_pe(tmp_path / "pe_counts.h5")
+    store, counter = _load_with_read_counts(monkeypatch, load_gw_store, pe_path)
+    assert np.asarray(store.columns["ra"]).size == _N
+    assert counter and max(counter.values()) == 1, counter
+
+    sel_path = _write_selection(tmp_path / "sel_counts.h5")
+    store, counter = _load_with_read_counts(
+        monkeypatch, load_selection_store, sel_path
+    )
+    assert np.asarray(store.columns["ra"]).size == _SEL_N
+    assert counter and max(counter.values()) == 1, counter
