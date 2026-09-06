@@ -31,7 +31,6 @@ that ships:
 | startup, cold XLA cache: data load phase (dark sirens) | 11.1-13.4 s | **4.6-4.7 s** | 2.6x |
 | startup, cold XLA cache: total setup inside a dynesty launch | 32.5 s | **24.0 s** | 1.35x |
 | the same setup with a warm `DARKSIRENS_XLA_CACHE` (opt-in, off by default, and off in every other row) | 37.2 s cold | **20.7 s warm** | 1.80x |
-| end to end, 20-event smoke under dynesty | 1.536 ms/proposal | **1.183 ms/proposal** | 1.30x |
 
 The per-call and peak-memory rows are this tree's own three-launch benchmark
 (dark sirens 10.869 -> 11.920 ms and spectral 2.594 -> 3.517 ms against the
@@ -74,16 +73,20 @@ setup from 37.2 s to 20.7 s (676 entries, 4.3 MB) and the spectral setup from
 composes with the load-phase win above rather than overlapping it.
 
 End to end under dynesty, one likelihood call including the prior transform and
-the sampler's own host work: 15.62 ms/proposal against 65.32 ms (4.18x) on the
-259-event production configuration (`nlive` 1000, seed 20260905, 4006 calls per
-arm, identical iteration counts), total wall 86.6 s against 294.2 s (3.40x),
-`logZ` -806.17593 against -806.17659. The gap between 15.62 ms/proposal here and
-10.84 ms/call in the table above is dynesty's ~6 ms of host overhead per
-proposal at this size, which this campaign does not touch. On a 20-event mock
-(`nlive` 500, `dlogz` 0.1) the same figure is 1.183 against 1.536 ms/proposal
-(1.30x), with `logZ` -158.5590 +/- 0.1535 against -158.8099 +/- 0.1513 (1.16
-sigma) and KS(H0) = 0.031 between the two posteriors -- smaller than the 0.042
-a seed change alone produces on the baseline code.
+the sampler's own host work, measured on the c625fa2 composition (16 pairing
+nodes per panel; the shipping tree adds about 1.05 ms per production call and
+0.9 ms per spectral call on top of these figures and was not re-timed end to
+end): 15.62 ms/proposal against 65.32 ms (4.18x) on the 259-event production
+configuration (`nlive` 1000, seed 20260905, 4006 calls per arm, identical
+iteration counts), total wall 86.6 s against 294.2 s (3.40x), `logZ` -806.17593
+against -806.17659. The gap between 15.62 ms/proposal and that tree's 10.84
+ms/call is dynesty's ~6 ms of host overhead per proposal at this size, which
+this campaign does not touch. On a 20-event mock (`nlive` 500, `dlogz` 0.1) the
+same tree gave 1.183 against 1.536 ms/proposal, with `logZ` -158.5590 +/- 0.1535
+against -158.8099 +/- 0.1513 (1.16 sigma) and KS(H0) = 0.031 between the two
+posteriors -- smaller than the 0.042 a seed change alone produces on the
+baseline code. At 20 events the extra pairing nodes are a larger fraction of
+the call, so that ratio does not carry to the shipping tree unmeasured.
 
 ### What moved numerically
 
