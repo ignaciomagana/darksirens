@@ -93,9 +93,11 @@ def _min_pairing_m1_grid(m_lo: float, pairing_m_hi: float, n_q: int) -> int:
 # production pairings carries NO nodes at all -- above the taper shoulder their
 # kernel is a bare ``q**beta`` and ``PairingModel._plateau_integral`` returns its
 # exact integral -- so those two models spend this many nodes per sample, not
-# twice it.  Deliberately a module constant and NOT a setting: the rule is calibrated as a pair (16 + 16) against
-# a converged reference, it is exercised on every likelihood call, and a knob
-# here would let a run silently pick a rule nobody measured.  ``pairing_edge_nq``
+# twice it.  Deliberately a module constant and NOT a setting: the rule is
+# calibrated as a whole (16 nodes on the taper panel, plus either 16 more or a
+# closed form on the plateau) against a converged reference, it is exercised on
+# every likelihood call, and a knob here would let a run silently pick a rule
+# nobody measured.  ``pairing_edge_nq``
 # remains configurable because it only serves the opt-in grid branch's rare
 # near-edge samples.
 PAIRING_PANEL_NQ: int = 16

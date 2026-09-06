@@ -30,8 +30,12 @@ What these tests pin
    O(1) bound and loses exactly the underflow protection the factoring exists
    for (a measured NaN-gradient regression lives there).
 4. THE GATE.  The hook is declared ONLY by the classes whose kernel above the
-   shoulder is bare, and a class that does not declare it keeps the
-   Gauss-Legendre panel bit-for-bit.
+   shoulder is bare; a class that does not declare it keeps a Gauss-Legendre
+   panel on every interval (pinned against an independent NumPy rule, with a
+   deliberately mis-hooked ``GaussianPairing`` as the positive control); and
+   where a class declares BOTH hooks, the closed form takes the LAST panel, not
+   the one above the shoulder -- the compatibility ``_plateau_integral``'s
+   docstring promises, which no shipped class exercises.
 5. WHAT IT BUYS.  At steep negative ``beta`` the plateau integrand ``q**beta`` is
    sharply peaked at ``q_a = m_shoulder/m1``, which shrinks like 1/m1, and GL-16
    does NOT resolve it: at beta = -1.9, m_shoulder = 4.2, the two-panel GL rule
@@ -149,13 +153,34 @@ def test_plateau_integrand_is_exactly_q_to_the_beta():
 # ---------------------------------------------------------------------------
 
 def test_closed_form_matches_the_exact_integral():
-    """Latin hypercube over ``(q_lo, beta)``, with ``beta + 1`` driven to 0."""
+    """Latin hypercube over ``(q_lo, beta)``, with ``beta + 1`` driven to 0.
+
+    Three regimes on purpose, because the hook has two branches and a threshold
+    between them (``|x| < 1e-6`` with ``x = (beta+1) log q_lo``):
+
+    * ``x`` far from 0 -- the ``expm1(x)/x`` branch;
+    * ``|x| <= 6e-8`` and exactly 0 -- the removable limit, where a 2-term
+      series would already do;
+    * and 60 rows placed INSIDE the window but NEAR ITS EDGE, 1e-7 <= |x| <=
+      9.9e-7, which is the only place the series' third term earns its keep.
+      Without those rows the ``x*x/6`` term can be deleted and every test in
+      this file still passes (measured); with them it fails at ~1e-13 against
+      the 1e-15 assert below.
+    """
     rng = np.random.default_rng(7)
     n = 4000
     beta = rng.uniform(-2.0, 7.0, n)
     beta[:200] = -1.0 + rng.uniform(-1e-8, 1e-8, 200)   # the removable limit
     beta[200:260] = -1.0                                # and exactly on it
     q_lo = np.exp(rng.uniform(np.log(1e-4), 0.0, n))
+    # x = (beta+1) log(q_lo) is solved for beta at a target x on the edge of the
+    # series window; both signs, ten decades-spanning q_lo.
+    q_band = np.repeat(np.exp(np.linspace(np.log(1e-4), np.log(0.5), 10)), 6)
+    s_band = np.tile(np.array([1e-7, -1e-7, 3e-7, -3e-7, 9.9e-7, -9.9e-7]), 10)
+    q_lo[260:320] = q_band
+    beta[260:320] = -1.0 + s_band / np.log(q_band)
+    x_band = (beta[260:320] + 1.0) * np.log(q_lo[260:320])
+    assert np.all(np.abs(x_band) < 1.0e-6) and np.all(np.abs(x_band) > 1.0e-8)
     got, _ = _powerlaw_plateau_integral(jnp.asarray(q_lo), jnp.asarray(beta))
     got = np.asarray(got)
     ref = exact_plateau(q_lo, beta)
@@ -279,35 +304,173 @@ def test_hook_is_declared_exactly_where_the_kernel_is_bare():
                                           jnp.asarray([0.9, 0.2])) is None
 
 
-def test_a_pairing_without_the_hook_is_bit_identical():
-    """No hook -> the panel list, the scale and the sum are unchanged.
+def numpy_panel_norm(pair, m1, m_min, dm_min, theta, closed_last=False):
+    """INDEPENDENT NumPy reimplementation of the shipped multi-panel rule.
 
-    ``GaussianPairing`` also declares extra ``_panel_edges``, so this covers the
-    multi-panel path as well as the two-panel one.
+    Edges at ``q_cut``, the shoulder and whatever ``_panel_edges`` declares,
+    clipped and sorted; 16 Gauss-Legendre nodes on each interval, except that
+    with ``closed_last`` the TOP interval is taken as the closed form
+    ``(1 - q**(beta+1))/(beta+1)`` of a bare ``q**beta``.  Written from the
+    specification rather than from the jax code, so agreement pins the
+    implementation -- unlike a comparison of the shipped code against itself
+    with the base-class method reinstalled, which for a class that never
+    declared the hook is the same code twice.
+    """
+    m1 = np.atleast_1d(np.asarray(m1, dtype=float))
+    m_edge, m_shoulder = pair._taper_shoulder(m_min, dm_min, theta)
+    q_cut = np.clip(float(m_edge) / m1, 0.0, 1.0)
+    q_a = np.clip(float(m_shoulder) / m1, q_cut, 1.0)
+    extra = [np.clip(float(e) + np.zeros_like(q_cut), q_cut, 1.0)
+             for e in pair._panel_edges(jnp.asarray(m1), m_min, dm_min, theta)]
+    cuts = np.sort(np.stack([q_cut, q_a] + extra, axis=-1), axis=-1)
+    edges = ([cuts[..., i] for i in range(cuts.shape[-1])]
+             + [np.ones_like(q_cut)])
+    glx, glw = np.polynomial.legendre.leggauss(16)
+    glt, glwt = 0.5 * (glx + 1.0), 0.5 * glw
+    quad = edges[:-1] if not closed_last else edges[:-2]
+    out = np.zeros(m1.shape)
+    for lo, hi in zip(quad, edges[1:len(quad) + 1]):
+        width = hi - lo
+        qn = lo[:, None] + width[:, None] * glt
+        p = np.asarray(pair._eval_unnorm(jnp.asarray(m1)[:, None],
+                                         jnp.asarray(qn), m_min, dm_min, theta))
+        out += np.sum(p * glwt, axis=-1) * width
+    if closed_last:
+        q_lo = edges[-2]
+        b1 = float(theta[0]) + 1.0
+        plateau = (np.log(1.0 / np.clip(q_lo, 1e-300, None)) if b1 == 0.0
+                   else (1.0 - q_lo ** b1) / b1)
+        out = out + np.where(q_lo < 1.0, plateau, 0.0)
+    return out
+
+
+class _WronglyHookedGaussian(GaussianPairing):
+    """Positive control: a class that declares the hook where it does NOT hold."""
+
+    def _plateau_integral(self, m1, q_lo, m_min, dm_min, theta):
+        del m1, m_min, dm_min, theta
+        return _powerlaw_plateau_integral(q_lo, 1.0)
+
+
+def test_a_pairing_without_the_hook_keeps_the_gauss_legendre_panel():
+    """No hook -> every panel is still a quadrature, and the sum is unchanged.
+
+    Pinned against the independent NumPy all-GL rule above, not against the
+    shipped code with the base-class method reinstalled: ``GaussianPairing``
+    never declared ``_plateau_integral``, so that comparison would run the same
+    code in both arms and could not fail.  (The stronger claim -- that this
+    class's ``(n_sc, scale)`` is bit-for-bit what it was before the hook
+    existed -- was verified directly against ``perf/pairing-two-panel-gl`` over
+    16 configurations during review; it cannot be asserted from inside one
+    checkout.)  ``GaussianPairing`` also declares extra ``_panel_edges``, so
+    this covers the multi-panel path as well as the two-panel one.
     """
     m1 = np.exp(np.linspace(np.log(2.0), np.log(200.0), 250))
-    t, w = U.get_pairing_panel_quadrature()
+    t, _ = U.get_pairing_panel_quadrature()
     for m_min, dm_min, mu, sig in ((5.0, 3.0, 0.9, 0.2), (6.0, 0.05, 0.5, 0.02),
                                    (2.0, 10.0, 0.95, 0.01)):
         theta = jnp.asarray([mu, sig])
-        got = norm(GP, m1, m_min, dm_min, theta, hook=True)
-        want = norm(GP, m1, m_min, dm_min, theta, hook=False)
-        assert np.array_equal(got, want)
+        assert GP._plateau_integral(jnp.asarray(m1), jnp.asarray(m1) * 0.0 + 0.5,
+                                    m_min, dm_min, theta) is None
+        got = norm(GP, m1, m_min, dm_min, theta)
+        want = numpy_panel_norm(GP, m1, m_min, dm_min, theta)
+        ok = want > 0
+        assert ok.any()
+        rel = np.abs(got[ok] / want[ok] - 1.0)
+        # Only the row-max scale factoring differs (association order).
+        assert np.max(rel) < 1e-12, (m_min, dm_min, mu, sig, np.max(rel))
+        assert np.array_equal(got[~ok], np.zeros(int((~ok).sum())))
         # ... and the panel count is untouched.
         panels = GP._panel_nodes(jnp.asarray(m1), m_min, dm_min, theta, t)
         assert len(panels) == 4      # q_cut | mu-5s | mu+5s | 1, sorted
+    # The comparison above has teeth: a class that DID declare the hook on this
+    # kernel -- where the plateau is a Gaussian, not a power law -- moves far
+    # outside that tolerance.
+    # (mu_q + 5 sigma_q must be below 1, or the panel the hook would take has
+    # zero width and even a nonsense hook contributes exactly nothing.)
+    theta = jnp.asarray([0.5, 0.02])
+    bad = norm(_WronglyHookedGaussian(ParamSpec(r"$\mu_q$", 0.0, 1.0),
+                                      ParamSpec(r"$\sigma_q$", 0.0, 1.0)),
+               m1, 5.0, 3.0, theta)
+    ref = numpy_panel_norm(GP, m1, 5.0, 3.0, theta)
+    ok = ref > 0
+    assert np.max(np.abs(bad[ok] / ref[ok] - 1.0)) > 1e-3
+
+
+def test_extra_panel_edges_and_the_closed_plateau_compose():
+    """The hook takes the LAST panel, not the panel above the shoulder.
+
+    ``_panel_norm`` hands ``_plateau_integral`` ``edges[-2]``.  For a subclass
+    that declares an extra edge the two are different: with an edge at q = 0.6
+    above the shoulder the panels are ``q_cut | q_a | 0.6 | 1`` and the closed
+    form owns ``[0.6, 1]``; ``edges[1] = q_a`` would double-count ``[q_a, 0.6]``
+    and drop nothing visible from the panel count.  No SHIPPED class declares
+    both hooks (the two production pairings have the plateau and no extra edges,
+    ``GaussianPairing`` the other way round), so the compatibility the
+    ``_plateau_integral`` docstring promises is only reachable through a
+    subclass written here.  Referenced against the independent NumPy rule above
+    -- which is not mutated along with the branch under test -- and, once,
+    against adaptive Gauss-Kronrod on the real ``_eval_unnorm``.
+    """
+    class _EdgeAbove(PowerLawPairing):
+        def _panel_edges(self, m1, m_min, dm_min, theta):
+            del m1, m_min, dm_min, theta
+            return (0.6,)
+
+    class _EdgeBelow(PowerLawPairing):
+        def _panel_edges(self, m1, m_min, dm_min, theta):
+            del m1, m_min, dm_min, theta
+            return (0.05,)
+
+    m1 = np.exp(np.linspace(np.log(15.0), np.log(400.0), 120))
+    for cls in (_EdgeAbove, _EdgeBelow):
+        pair = cls(ParamSpec(r"$\beta$", -2.0, 7.0))
+        for m_min, dm_min, beta in ((5.0, 3.0, 1.0), (3.05, 1.15, -1.9),
+                                    (5.0, 3.0, -2.0)):
+            theta = jnp.asarray([beta])
+            edges = pair._panel_boundaries(jnp.asarray(m1), m_min, dm_min, theta)
+            assert len(edges) == 4      # q_cut | q_a | declared edge | 1, sorted
+            got = norm(pair, m1, m_min, dm_min, theta)
+            want = numpy_panel_norm(pair, m1, m_min, dm_min, theta,
+                                    closed_last=True)
+            ok = want > 0
+            assert ok.any()
+            rel = float(np.max(np.abs(got[ok] / want[ok] - 1.0)))
+            assert rel < 1e-12, (cls.__name__, m_min, dm_min, beta, rel)
+    # ... and the composition is right in absolute terms, not just consistent
+    # with a reimplementation of the same specification.
+    quad = pytest.importorskip("scipy.integrate").quad
+    pair = _EdgeAbove(ParamSpec(r"$\beta$", -2.0, 7.0))
+    theta = jnp.asarray([-1.9])
+    # Only m1 where the declared edge leaves the GL panels a smooth
+    # integrand: at m1 = 300 the q**-1.9 boundary layer at q_a = 0.014 sits
+    # INSIDE the [q_a, 0.6] panel this subclass created, and GL-16 is 8e-4
+    # off there -- that is the declared edge's own doing, not the
+    # composition's, and the closed plateau is what removes it when no edge
+    # is declared (see test_closed_plateau_removes_the_steep_beta_error).
+    for m1_one in (30.0, 80.0):
+        q_cut = 3.05 / m1_one
+        pts = sorted({q_cut, min(max(4.2 / m1_one, q_cut), 1.0), 0.6, 1.0})
+        ref = sum(quad(lambda x: float(np.asarray(pair._eval_unnorm(
+            jnp.asarray(m1_one), jnp.asarray(x), 3.05, 1.15, theta))),
+            lo, hi, epsabs=1e-18, epsrel=1e-13, limit=400)[0]
+            for lo, hi in zip(pts[:-1], pts[1:]) if hi > lo)
+        got = float(norm(pair, m1_one, 3.05, 1.15, theta)[0])
+        # 1e-6, not round-off: the two GL-16 panels BELOW the closed one carry
+        # their own residual here (measured 7.6e-8 at m1 = 80, beta = -1.9).
+        assert abs(got / ref - 1.0) < 1e-6, (m1_one, got, ref)
 
 
 # ---------------------------------------------------------------------------
 # 5. WHAT IT BUYS: the H0-coherent hole GL-16 leaves at steep negative beta.
 # ---------------------------------------------------------------------------
 
-# (m_min, dm_min, beta).  The first row is where the production H0 scan was run;
-# q_a = (m_min+dm_min)/m1 shrinks like 1/m1, so q**beta with beta ~ -2 becomes a
-# boundary layer at the LEFT edge of the plateau panel that GL-16 cannot see.
-# (m_min, dm_min, beta, bound_on_the_new_rule).  The last row is the control: a
-# WIDE taper with a mild beta, where the residual is panel A's and the closed
-# plateau changes nothing -- it must not regress either.
+# (m_min, dm_min, beta, bound_on_the_new_rule).  The first row is where the
+# production H0 scan was run; q_a = (m_min+dm_min)/m1 shrinks like 1/m1, so
+# q**beta with beta ~ -2 becomes a boundary layer at the LEFT edge of the
+# plateau panel that GL-16 cannot see.  The last row is the control: a WIDE
+# taper with a mild beta, where the residual is panel A's and the closed plateau
+# changes nothing -- it must not regress either.
 _STEEP = [(3.05, 1.15, -1.9, 1e-6), (5.0, 3.0, -2.0, 1e-6),
           (2.0, 0.0, -1.75, 0.0), (10.0, 10.0, -1.5, 2e-4)]
 
@@ -335,12 +498,14 @@ def test_closed_plateau_removes_the_steep_beta_error():
 
 
 def test_closed_plateau_is_never_worse_over_the_prior_box():
-    """400 draws x 600 m1: the worst |Delta log N| may only go down.
+    """Over the prior box the worst |Delta log N| may only go down.
 
-    Measured over this box: 6.7e-3 nats for the two-panel GL rule against
-    4.6e-3 with the closed plateau, and the largest single move is 6.7e-3 at
-    (m_min, dm_min, beta) = (2.73, 1.15, -1.79) -- where the GL rule carried
-    essentially all of the error and the closed form removes it.
+    Measured OFFLINE over 400 draws x 600 log-spaced m1 in [2, 300]: 6.7e-3 nats
+    for the two-panel GL rule against 4.6e-3 with the closed plateau, and the
+    largest single move is 6.7e-3 at (m_min, dm_min, beta) = (2.73, 1.15, -1.79)
+    -- where the GL rule carried essentially all of the error and the closed
+    form removes it.  This test re-checks a 60 x 300 subsample of that box on
+    every run; the full sweep is too slow for the suite.
     """
     rng = np.random.default_rng(11)
     nd = 60

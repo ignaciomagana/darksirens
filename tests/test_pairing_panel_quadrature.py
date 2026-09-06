@@ -24,8 +24,12 @@ What these tests pin
    composite Gauss-Legendre rule.
 2. The BOUND: worst |Delta log N| against a composite-Gauss-Legendre reference
    over prior draws, both NEAR THE SUPPORT EDGE (7.6e-3 nats) and over the FULL
-   prior box (4.6e-2, at m_min = 2, dm_min = 0, beta = -2, m1 = 250 -- the error
-   grows with m1/q_a), and the strictly smaller H0-COHERENT component that is
+   prior box (7.4e-8, at m_min = 8.42, dm_min = 8.67, beta = -0.84, m1 = 15.8).
+   Both residuals now belong to the TAPER panel: since 2026-09-06 the plateau is
+   integrated in closed form, which is why the box bound is five orders of
+   magnitude under the near-edge one instead of 6x over it (the pure-GL plateau
+   was 4.6e-2 at m_min = 2, dm_min = 0, beta = -2, m1 = 250, growing with
+   m1/q_a).  Also the strictly smaller H0-COHERENT component that is
    the reason the change is admissible at all (a smaller worst case does NOT
    imply a smaller tilt -- measured inversions exist -- so the tilt is asserted
    directly, at the amplitude-worst corners too).
@@ -234,7 +238,7 @@ def test_worst_case_bound_and_improvement_over_the_trapezoid(capsys):
     with capsys.disabled():
         print(f"\n[pairing_panel] worst |Delta log N| over the 24 cells above "
               f"m_min, 50 prior draws, vs a composite-GL reference:\n"
-              f"    2-panel GL-16 (shipped): {worst_new:.3e}\n"
+              f"    GL-16 + closed plateau (shipped): {worst_new:.3e}\n"
               f"    200-node trapezoid (pre-2026-09-05): {worst_old:.3e}")
     assert worst_new < 1.5e-2, worst_new           # documented NEAR-EDGE bound
     assert worst_new < 0.5 * worst_old, (worst_new, worst_old)
@@ -243,22 +247,27 @@ def test_worst_case_bound_and_improvement_over_the_trapezoid(capsys):
 def test_worst_case_bound_over_the_full_prior_box(capsys):
     """The bound over the WHOLE support, not just the cells above m_min.
 
-    The two-panel rule's residual grows with m1/q_a -- the kernel panel
-    ``[q_a, 1]`` gets longer and, at a steeply negative beta, more curved -- so
-    the near-edge bound above does not bound the prior box.  Swept over the
-    reachable powerlaw+peak corners (m_min in [2, 10], dm_min in [0, 10],
-    beta in [-2, 7]) plus 40 draws, m1 log-spaced over [m_min, 250]:
+    Historically this was the LARGER of the two bounds: with the plateau panel
+    integrated by Gauss-Legendre its residual grew with m1/q_a -- the panel
+    ``[q_a, 1]`` gets longer and, at a steeply negative beta, its integrand
+    becomes a boundary layer at the panel's own left edge -- so the near-edge
+    bound did not bound the prior box (4.6e-2 nats, at (2.0, 0.0, -2.0),
+    m1 = 250).  Since 2026-09-06 that panel is a closed form
+    (``PairingModel._plateau_integral``), so what is left here is the TAPER
+    panel's residual, which is largest at a WIDE taper and mild beta.  Swept
+    over the reachable powerlaw+peak corners (m_min in [2, 10], dm_min in
+    [0, 10], beta in [-2, 7]) plus 40 draws, m1 log-spaced over [m_min, 250]:
 
-        2-panel GL-16 (shipped)              4.6e-2 nats, at (2.0, 0.0, -2.0),
-                                             m1 = 250 -- the worst reachable
-                                             corner in every direction at once
+        GL-16 + closed plateau (shipped)     7.4e-8 nats, at
+                                             (8.42, 8.67, -0.84), m1 = 15.8
         200-node trapezoid (pre-2026-09-05)  2.9e-1 nats
 
-    i.e. 6x better, and better on EVERY draw (the loop fails if any draw
-    inverts).  The amplitude here is 60x the near-edge one and still 6x under
-    what it replaced; the statistic that decides admissibility is the coherent
-    part, which :func:`test_h0_coherent_component_is_far_below_the_tilt_budget`
-    pins at these same corners.
+    i.e. better on EVERY draw (the loop fails if any draw inverts).  The
+    statistic that decides admissibility is the coherent part, which
+    :func:`test_h0_coherent_component_is_far_below_the_tilt_budget` pins at the
+    near-edge-worst corners; at the box-worst corner above the coherent part is
+    1.1e-3 nats and is the SAME for the pure-GL rule, because the plateau is not
+    what carries it.
     """
     rng = np.random.default_rng(11)
     draws = [(2.0, 0.01, -2.0), (2.0, 0.0, -2.0), (3.0, 0.0, -2.0),
@@ -285,9 +294,9 @@ def test_worst_case_bound_over_the_full_prior_box(capsys):
     with capsys.disabled():
         print(f"\n[pairing_panel] worst |Delta log N| over the FULL prior box "
               f"(m1 in [m_min, 250], 48 corners/draws):\n"
-              f"    2-panel GL-16 (shipped): {worst_new:.3e}\n"
+              f"    GL-16 + closed plateau (shipped): {worst_new:.3e}\n"
               f"    200-node trapezoid (pre-2026-09-05): {worst_old:.3e}")
-    assert worst_new < 6.0e-2, worst_new           # documented FULL-BOX bound
+    assert worst_new < 1.0e-6, worst_new           # documented FULL-BOX bound
     assert worst_new < 0.25 * worst_old, (worst_new, worst_old)
 
 

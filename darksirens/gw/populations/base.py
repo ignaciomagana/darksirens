@@ -380,10 +380,19 @@ class PairingModel(ABC):
         nodes and two thirds of the transcendentals of this rule went.
 
         Returns a tuple of ``(nodes, width)`` panels, ``nodes`` of shape
-        ``m1.shape + (len(t),)``.  The panel BOUNDARIES themselves are built by
-        :meth:`_panel_boundaries`, which :meth:`_panel_norm` also needs on its
-        own so it can hand the last panel's lower edge to
-        :meth:`_plateau_integral`.
+        ``m1.shape + (len(t),)``.
+
+        NOT ON THE HOT PATH, AND NOT AN OVERRIDE POINT.  :meth:`_panel_norm`
+        does not call this: it needs the panel EDGES on their own (to hand the
+        last one's lower edge to :meth:`_plateau_integral`) and it must not
+        build nodes for a panel the closed form has taken over, so it walks
+        :meth:`_panel_boundaries` and :meth:`_panel_from_edges` itself.  This
+        method is the executable description of the rule -- what the tests
+        exercise, and what a reader should read first -- but overriding it
+        changes nothing the normaliser does.  A subclass that wants a different
+        SPLIT overrides :meth:`_panel_edges` (extra interior edges) or, for a
+        wholesale change, :meth:`_panel_boundaries`; one that wants a different
+        NODE RULE overrides :meth:`_panel_norm`.
         """
         edges = self._panel_boundaries(m1, m_min, dm_min, theta)
         return tuple(self._panel_from_edges(lo, hi, t)
@@ -462,7 +471,10 @@ class PairingModel(ABC):
         lower edge rather than the shoulder itself, so it stays correct for a
         subclass that declares extra edges through :meth:`_panel_edges` above the
         shoulder: those are sorted into the edge list, so ``q_lo >= q_a`` always
-        and the kernel is bare over the whole panel either way.
+        and the kernel is bare over the whole panel either way.  No shipped class
+        declares both hooks, so that composition is pinned by a subclass written
+        for it, in
+        ``tests/test_pairing_plateau_closed_form.py::test_extra_panel_edges_and_the_closed_plateau_compose``.
 
         Worth doing because the plateau panel is half the per-sample quadrature
         and the more expensive half: a node there costs a ``log`` and two ``exp``
