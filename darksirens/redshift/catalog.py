@@ -210,8 +210,9 @@ def _resolve_row_chunk(n_rows: int, n_max: int) -> int | None:
 # centred window provably holds every galaxy within n_sigma widths of any
 # sample, so the evaluator never truncates inside the contract.  A sample beyond
 # the row's support straddles the nearest galaxies (far-tail evaluations stay
-# finite down to 745 nats below the row's kernel maximum, where the one-pass
-# reduction floors them at -inf); windows containing zero real galaxies go
+# accurate to a few hundred nats below the row's kernel maximum, then degrade
+# and floor at -inf at the backend's exp underflow edge -- see the one-pass
+# branch in ``eval_log_catalog_prior_state``); windows with zero real galaxies go
 # through the same reduction as empty full rows (log_kw is sanitized to -1e30 at
 # state build time, so the reduction has finite gradients).
 _KDE_WINDOW_SIZE = 1024                # static window size W; None = full row
@@ -1478,7 +1479,9 @@ def eval_log_catalog_prior_state(
     (``CatalogKernelState.log_kw_eff_rowmax``) instead of the sample's own, so
     the ``logsumexp`` amax pass -- and with it the (N_samples, N_max) f64
     intermediate XLA materialises between the two passes -- disappears.  The
-    price is a floor at 745 nats below the row maximum; see the branch itself.
+    price is an underflow edge below the row maximum -- 708.4 nats on the XLA
+    CPU backend, 744.4 on CUDA, with a degradation band just above it; see the
+    branch itself.
 
     Self-verifying windowed branch.  Whether to EMIT the windowed code is a
     trace-time Python decision that reads mutable process globals
@@ -1510,8 +1513,10 @@ def eval_log_catalog_prior_state(
             or _traced_rows_attested(em_catalog.zgals)
         )
     )
+    # ONE int32 row index for every use below (the windowed dynamic slice, the
+    # full-row gathers, the row-max offset and the empty-row select).
+    pix_i = jnp.asarray(pix, dtype=jnp.int32)
     if use_window:
-        pix_i = jnp.asarray(pix, dtype=jnp.int32)
         n_real = em_catalog.ngals[pix_i]
         start = _sorted_row_window_start(
             em_catalog.zgals, pix_i, z, n_real, window
@@ -1525,7 +1530,7 @@ def eval_log_catalog_prior_state(
             return lax.dynamic_slice(a, (pix_i, start), (1, window))[0]
     else:
         def _gather(a):
-            return a[pix]
+            return a[pix_i]
 
     log_kw_eff = getattr(state, "log_kw_eff", None)
     rowmax = getattr(state, "log_kw_eff_rowmax", None)
@@ -1558,15 +1563,29 @@ def eval_log_catalog_prior_state(
         # coordinates).  Nothing here carries a sampled label -- the offset is
         # a catalog constant and ``sig_eff`` is theta-invariant once
         # ``sigma_kde`` is fixed -- so no H0-correlated component is possible.
-        # The one behaviour change is that a row whose every term sits more
-        # than ~745 nats below its own maximum underflows to -inf instead of
-        # returning that finite value; such a sample is annihilated by
-        # ``exp(-745) = 0`` in the ``logaddexp`` the caller weighs it in, and
-        # in the production configuration the set is empty (worst headroom
-        # actually used below ``z_depth``: 178 nats of the 745 available,
-        # over 51,959 PE + 52,594 selection samples at 5 values of H0).
+        # The one behaviour change is a finite OFFSET BUDGET, and it is graded
+        # rather than binary.  ``exp`` of a large negative argument underflows
+        # at the backend's edge: the XLA CPU backend FLUSHES subnormal results,
+        # so the budget there is ln(smallest normal f64) = 708.40 nats, while
+        # CUDA keeps subnormals and floors at ln(smallest subnormal) = 744.44.
+        # Just above the edge the value is still finite but no longer exact --
+        # MEASURED on an H100 NVL with a one-galaxy row: relative drift 4e-15
+        # at 720 nats of deficit, 2e-12 at 725 (the first point past the
+        # campaign's ulp-level bar), 3.4e-4 (0.25 nats) at 744, -inf from 745.
+        # On XLA CPU the same band appears by a different mechanism -- whole
+        # kernel terms flushed to zero, since the offset is the ROW's maximum
+        # and not the sample's -- and MEASURED 5.9 nats of error on a finite
+        # value at 707.5-708.2 nats of deficit on a synthetic 1001-galaxy row
+        # whose weights span 1 nat.  None of it is observable downstream: a
+        # sample 708 nats under its row's peak carries weight ``exp(-708) = 0``
+        # in the ``logaddexp`` the caller weighs it in, whatever value it
+        # returns.  And the production configuration stays 530 nats clear of
+        # the nearer (CPU) edge -- worst headroom actually used below
+        # ``z_depth``: 178 nats of the 708 available, over 51,959 PE + 52,594
+        # selection samples at 5 values of H0; ``test_kde_window_auto.py``
+        # pins the edge against the live backend.
         u = (z - zs) * _gather(inv_sig_eff)
-        m = rowmax[jnp.asarray(pix, dtype=jnp.int32)]
+        m = rowmax[pix_i]
         s = jnp.sum(jnp.exp(_gather(log_kw_eff) - m - 0.5 * u * u))
         # The double ``where`` is the gradient-safe spelling: a naked
         # ``log(s)`` returns NaN cotangents when a row underflows to s = 0,
@@ -1593,9 +1612,7 @@ def eval_log_catalog_prior_state(
     # contract with one per-row scalar select (zero gradient on empty rows,
     # bit-identical elsewhere -- the sanitized padding underflows to 0 weight).
     if state.row_empty is not None:
-        log_mix = jnp.where(
-            state.row_empty[jnp.asarray(pix, dtype=jnp.int32)], -jnp.inf, log_mix
-        )
+        log_mix = jnp.where(state.row_empty[pix_i], -jnp.inf, log_mix)
     # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
     # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
     # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.

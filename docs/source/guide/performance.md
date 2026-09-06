@@ -132,27 +132,57 @@ H100 NVL either one alone is worth about 6 ms and leaves the intermediate in
 place. A state without the two leaves (a hand-built one) falls back to the
 `logsumexp` form. The windowed evaluator shares the full-row offset (a maximum
 over a subset is no larger, so the offset is still valid); measured on the real
-DESI catalog a window gives away at most 12 of the 745 nats below, and the
-production run never windows at all (`W` 3456 exceeds the 1719-galaxy rows).
+DESI catalog a window gives away at most 12 nats of the offset budget below,
+and the production run never windows at all (`W` 3456 exceeds the 1719-galaxy
+rows).
 
 Measured on the full production likelihood (259 events, DESI nside-64, field
 weighting, `zspace`-24 `n_sigma` 6, `sigma_kde` pinned, auto blocking) on an
-H100 NVL, median of 20 warm calls: 32.2 ms/call against 59.2 ms (1.84x) and
-peak device memory 12.24 GB against 22.62 GB, with the log-likelihood
-bit-identical at eight prior draws spanning `H0` in `[20, 140]` (the five
-finite ones agree to the last bit and the same three are `-inf`). The spectral
-configuration has no catalog KDE and is unchanged (13.9 against 14.0 ms,
-bit-identical).
+H100 NVL, median of 20 warm calls: 32.2 ms/call against 59.2 ms (1.84x), with
+the log-likelihood bit-identical at eight prior draws spanning `H0` in
+`[20, 140]` (the five finite ones agree to the last bit and the same three are
+`-inf`). Peak device memory, read as `peak_bytes_in_use` in the benchmark
+process after those eight draws, falls from 22.6-24.3 GB to 12.2-13.1 GB
+(-45.9% on interleaved same-slot arms; the absolute number moves with how many
+calls preceded the read, the ratio does not). The spectral configuration has no
+catalog KDE and is unchanged (13.9 against 14.0 ms, bit-identical).
 
-The build-time offset costs one thing: a sample whose every kernel term sits
-more than 745 nats (the log of the f64 denormal floor) below its row's maximum
-sums to exactly zero and returns `-inf` where the two-pass form returned a
-finite value of order `-1e3`. Such a sample carries weight `exp(-745) = 0`
-against any sample near the row's peak, so nothing downstream can see it. In
-the production configuration the set is empty by a wide margin -- the deepest
-headroom actually used below `z_depth = 0.3` is 178 nats of the 745 available,
-measured over 51,959 PE samples and 52,594 injections at five values of `H0` --
-and a run with no survey depth reaches it for at most 2e-3 of samples.
+The two leaves are BUILD-time, not per-call. Under the `H0` kernel pin (the
+configuration benchmarked above) they are lifted straight off the pinned
+quadrature and the only per-proposal work is one `(N_rows,)` add. When the pin
+is inadmissible -- any run that samples `Om0`, `w0`, `wa`, `delta` or
+`sigma_kde`, see `kernel_pin_admissible` -- `catalog_kernel_state` rebuilds
+both leaves per proposal: a `(49152, 1719)` f64 reciprocal (676 MB) and a
+row reduction over the same array, on top of the fused weights it already
+built. That extra build work is bought back many times over by the same call:
+measured on an H100 NVL with `sigma_kde` moved out of the fixed set (21 sampled
+labels, everything else as above, median of 10 warm calls, interleaved
+same-slot arms), 344.7 ms/call before and 314.4 ms/call after -- 1.10x, with
+the log-likelihood bit-identical at all eight prior draws (seven finite, the
+same one `-inf`). The per-call cost there is dominated by rebuilding the whole
+kernel state, which is why the fraction saved is smaller than under the pin.
+
+The build-time offset costs one thing: a finite OFFSET BUDGET below the row's
+maximum, set by where `exp` underflows on the backend. The XLA CPU backend
+flushes subnormal `exp` results to zero, so the budget there is
+`ln(smallest normal f64) = 708.40` nats; CUDA keeps subnormals and floors at
+`ln(smallest subnormal) = 744.44`. The transition is graded, not binary. Just
+above the edge the value is still finite but no longer exact: measured on an
+H100 NVL with a one-galaxy row, the relative drift against the two-pass form is
+4e-15 at 720 nats of deficit, 2e-12 at 725, and 3.4e-4 (0.25 nats) at 744
+before `-inf` from 745. On the CPU backend the same band appears by a different
+mechanism -- the offset is the ROW's maximum, not the sample's, so whole kernel
+terms flush to zero -- and costs 5.9 nats on a finite value at 707.5-708.2 nats
+of deficit on a synthetic 1001-galaxy row whose weights span 1 nat.
+
+Nothing downstream can see any of it: a sample 708 nats under its row's peak
+carries weight `exp(-708) = 0` in the `logaddexp` the caller weighs it in,
+whatever value it returns. In the production configuration the set is empty by
+a wide margin -- the deepest headroom actually used below `z_depth = 0.3` is
+178 nats of the 708 available, measured over 51,959 PE samples and 52,594
+injections at five values of `H0`. A run on a catalog with no `z_depth`
+attribute and no `--survey_z_depth` enters the band for at most 2e-3 of
+samples, monotonically more of them as `H0` rises.
 
 ## The frozen redshift prior (population-only runs)
 
