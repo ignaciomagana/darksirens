@@ -16,6 +16,7 @@ import tempfile
 import h5py
 import numpy as np
 import jax
+import jax.experimental
 import jax.numpy as jnp
 from jax import vmap
 import pytest
@@ -28,10 +29,13 @@ from darksirens.redshift.catalog import (
     configure_catalog_kde_window,
     recommended_kde_window,
 )
+import darksirens.catalogs.io as catalogs_io
 from darksirens.catalogs.io import (
     ROW_Z_SORT_INVARIANT_ERROR,
     _row_z_sort_order,
     _row_z_sort_order_device,
+    _sort_survey_rows_by_z_device,
+    device_row_sort_admissible,
     load_survey,
     load_survey_marks,
     sort_survey_rows_by_z,
@@ -179,9 +183,10 @@ def test_device_sort_is_byte_identical_to_the_host_sort():
     assert np.array_equal(order_d.astype(np.int64), order_h)
 
     host = sort_survey_rows_by_z(zg, dz, wg, ng, extras=(mark, None))
-    dev = sort_survey_rows_by_z(
-        zg, dz, wg, ng, extras=(mark, None), to_device=True
-    )
+    # The implementation directly, NOT via to_device: on the CPU-only gate
+    # runs device_row_sort_admissible() is False and the dispatch would hand
+    # back the numpy result, making this test vacuous.
+    dev = _sort_survey_rows_by_z_device(zg, dz, wg, ng, extras=(mark, None))
     for a, b in zip(host[:4], dev[:4]):
         assert np.array_equal(np.asarray(b), np.asarray(a))
     assert dev[4][1] is None
@@ -196,14 +201,20 @@ def test_device_sort_asserts_on_nan_redshift():
     zg, dz, wg, ng = _raw_mock(rng, n_gal=50, n_max=60)
     zg[0, 3] = np.nan
     with pytest.raises(AssertionError, match="row z-sort invariant violated"):
-        sort_survey_rows_by_z(zg, dz, wg, ng, to_device=True)
+        _sort_survey_rows_by_z_device(zg, dz, wg, ng)
     with pytest.raises(AssertionError) as exc:
         sort_survey_rows_by_z(zg, dz, wg, ng)
     assert str(exc.value) == ROW_Z_SORT_INVARIANT_ERROR
 
 
-def test_load_survey_device_and_host_paths_agree_bitwise(tmp_path):
-    """load_survey routes the sort to the device only when it uploads."""
+def test_load_survey_device_and_host_paths_agree_bitwise(tmp_path, monkeypatch):
+    """The two load_survey paths return the same bytes, marks co-indexed.
+
+    The gate is forced open so the device implementation is genuinely what
+    the ``to_device=True`` arm runs even on a CPU-only test box (where
+    :func:`device_row_sort_admissible` is False by design).
+    """
+    monkeypatch.setattr(catalogs_io, "device_row_sort_admissible", lambda: True)
     rng = np.random.default_rng(2718)
     zg, dz, wg, ng = _raw_mock(rng, n_gal=120, n_max=140)
     path = os.path.join(tmp_path, "survey.hdf5")
@@ -224,6 +235,48 @@ def test_load_survey_device_and_host_paths_agree_bitwise(tmp_path):
     # the device-sorted galaxy arrays.
     order = _row_z_sort_order(zg, ng)
     assert np.array_equal(np.asarray(dev[2]), np.take_along_axis(zg, order, axis=1))
+
+
+def test_device_row_sort_gate_requires_an_accelerator_and_x64(monkeypatch):
+    """The admissibility predicate, and that the dispatch obeys it.
+
+    ``to_device`` says "the caller will upload these arrays", not "there is
+    an accelerator".  On a CPU-only install XLA-CPU's argsort is ~3.2x slower
+    than ``np.argsort(kind="stable")`` on production-shaped rows, so the
+    device implementation must NOT be taken there; with x64 off it would also
+    build a float32 key whose permutation diverges from the float64 one
+    :func:`load_survey_marks` re-derives.
+    """
+    on_cpu = jax.default_backend() == "cpu"
+    x64 = bool(jax.config.jax_enable_x64)
+    assert device_row_sort_admissible() is (not on_cpu and x64)
+    if on_cpu:  # the regression this gate exists for
+        assert device_row_sort_admissible() is False
+    with jax.experimental.disable_x64():  # whatever the backend
+        assert device_row_sort_admissible() is False
+
+    def _boom(*a, **k):  # pragma: no cover - must never be reached
+        raise AssertionError("device sort taken while inadmissible")
+
+    monkeypatch.setattr(catalogs_io, "_sort_survey_rows_by_z_device", _boom)
+    monkeypatch.setattr(catalogs_io, "device_row_sort_admissible", lambda: False)
+    rng = np.random.default_rng(11)
+    zg, dz, wg, ng = _raw_mock(rng, n_gal=40, n_max=50)
+    out = catalogs_io.sort_survey_rows_by_z(zg, dz, wg, ng, to_device=True)
+    assert isinstance(out[0], np.ndarray)  # the numpy implementation ran
+    assert np.array_equal(out[0], sort_survey_rows_by_z(zg, dz, wg, ng)[0])
+
+
+def test_device_sort_handles_a_zero_row_catalog():
+    """The two implementations agree on a zero-row catalog (gather edge)."""
+    z = np.zeros((0, 5))
+    ng = np.zeros(0, dtype=int)
+    host = sort_survey_rows_by_z(z, z, z, ng, extras=(z, None))
+    dev = _sort_survey_rows_by_z_device(z, z, z, ng, extras=(z, None))
+    for a, b in zip(host[:4], dev[:4]):
+        assert np.asarray(b).shape == np.asarray(a).shape
+    assert dev[4][1] is None
+    assert np.asarray(dev[4][0]).shape == (0, 5)
 
 
 def test_sort_asserts_on_nan_redshift():
