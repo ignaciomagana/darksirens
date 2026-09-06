@@ -5,6 +5,11 @@
 #
 # SIZE OF THIS GATE (keep this block honest — it drifted badly once).
 #
+#   2026-09-05 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4):
+#     69 files, 823 tests collected.  The one file added since 2026-08-23 is
+#     tests/test_xla_compilation_cache.py (the opt-in XLA persistent
+#     compilation cache and the benchmark's recompile guard), 18 tests in 1.7 s.
+#
 #   2026-08-23 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4):
 #     68 files, 805 tests collected.
 #     Last end-to-end timing: 17m47s in GitHub CI at a0ba24f, and 21m10s on a
@@ -123,3 +128,4 @@ tests/test_cold_import_precision.py
 tests/test_kde_batch_kernel.py
 tests/test_kde_window_auto.py
 tests/test_frozen_redshift_prior.py
+tests/test_xla_compilation_cache.py

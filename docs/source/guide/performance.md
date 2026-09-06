@@ -232,18 +232,30 @@ one box).
 Measured on an H100 NVL with `scripts/benchmarks/bench_likelihood_call.py
 --n-calls 20`, 259-event DESI nside-64 production configuration (H0 +
 population + survey sampled, `zspace`-24/`ns6` quadrature, auto blocking),
-three launches per arm:
+five launches per arm across two sessions:
 
 | Arm | load | build | first call | XLA compiles | call median |
 |---|---|---|---|---|---|
-| cache off | 11.4 s | 15.5 s | 10.3 s | 347 | 59.6 ms |
-| cold (writes the cache) | 11.5 s | 16.1 s | 10.0 s | 338 | 59.7 ms |
-| warm | 11.0 s | 7.8 s | 1.9 s | 0 | 59.5 ms |
+| cache off | 11.2-11.5 s | 15.3-15.9 s | 9.9-10.5 s | 347 | 59.4-59.8 ms |
+| cold (writes the cache) | 11.4-11.5 s | 16.1 s | 10.0-10.1 s | 338 | 59.7-59.9 ms |
+| warm | 10.9-11.2 s | 7.4-7.9 s | 1.8-2.0 s | 0 | 59.5-59.8 ms |
 
 That is 37.2 s of setup against 20.7 s warm, 16.5 s saved per launch, for
 676 entries / 4.3 MB on disk. The 259-event spectral configuration goes from
 7.7 s of setup (162 compiles) to 4.1 s (0 compiles), 3.6 s saved, for
-312 entries / 1.8 MB. The cold run pays nothing measurable.
+312 entries / 1.8 MB. The per-call medians of the two arms straddle each other
+and the master baseline (59.2 ms): the cache cannot move per-call time, and the
+range above is the process-to-process spread.
+
+The COLD run pays for the writes, by a small but real margin: build 16.1 s
+against cache-off builds of 15.3-15.9 s in the same sessions, and +1.7 s of
+build (about +2 s of setup) in an independent reproduction on the same box.
+Once `jax_compilation_cache_max_size` is set, `LRUCache._evict_if_needed` runs
+on every write and rescans the directory, so the penalty grows with the entry
+count. It is paid once per configuration, and it is the reason the cache root
+should be a LOCAL directory: 338 writes each rescanning a growing directory on
+a shared network filesystem would be considerably worse (nothing refuses such a
+path, so this is a judgement call, not a guardrail).
 
 Per-call time is untouched — the cache returns the same serialized executable
 `backend_compile` produced, keyed on the HLO module plus the jaxlib version,
@@ -255,9 +267,20 @@ misses the cache and compiles.
 So this is worth ~0.03% of a 1e6-call production dynesty wall and roughly half
 the wall of a smoke run or a repeated benchmark launch.
 
-`bench_likelihood_call.py` reports `compiles: <N> total, <M> inside the timed
-loop  xla_cache_dir=<dir>`, so a benchmark JSON records which cache state it
-was measured in; never share one cache directory between the two arms of a
-timed A/B. `--recompile-guard` exits nonzero if any compilation happens inside
-the timed loop, which is how a per-call shape or static-argument leak is caught
-as itself rather than as a fat, noisy median.
+`bench_likelihood_call.py` records `compiles_total` (real compilations),
+`compile_requests_total` and `compile_requests_in_timed_loop` (executables JAX
+asked for, compiled OR served from the cache) and `xla_cache_dir` in its
+summary JSON, and prints them, so a benchmark JSON states which cache state it
+was measured in. Startup phase timings are only comparable between arms with
+the same `xla_cache_dir`, and no cache directory should ever be shared between
+the two arms of a timed A/B.
+
+`--recompile-guard` exits nonzero if anything is lowered inside the timed loop,
+which is how a per-call shape or static-argument leak is caught as itself
+rather than as a fat, noisy median. It counts compile REQUESTS, not
+compilations, precisely because of the cache above: a leak whose modules are
+already on disk never calls `backend_compile` and would otherwise be reported
+as clean while still paying a lowering, a cache read and a deserialize on every
+call (measured on a CPU probe: a four-shape loop is 6 compilations cold and 0
+compilations / 6 compile requests warm). The summary JSON is written before the
+guard exits, so a tripped run still leaves its evidence.

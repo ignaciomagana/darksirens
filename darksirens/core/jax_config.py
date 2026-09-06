@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 
 #: Environment variable naming the root of the on-disk XLA persistent
 #: compilation cache.  Unset or empty (the default) leaves the cache OFF, so
@@ -68,16 +69,27 @@ def configure_jax_runtime() -> None:
     os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", DEFAULT_XLA_ALLOCATOR)
 
     cache_root = os.environ.get(XLA_CACHE_ENV, "").strip()
-    if cache_root:
-        _install_local_path_shim()
+    shimmed = _install_local_path_shim() if cache_root else False
 
     import jax
 
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
 
-    if cache_root:
+    if cache_root and shimmed:
         enable_persistent_compilation_cache(cache_root)
+    elif cache_root:
+        # Setting jax_compilation_cache_dir without the shim recreates exactly
+        # the state this feature exists to fix: every get/put raises, JAX logs
+        # at debug level, the directory stays empty and the user who opted in
+        # sees no difference and no message.  Say so and leave the cache off.
+        warnings.warn(
+            f"{XLA_CACHE_ENV} is set but jax._src.path could not be made usable "
+            "for a local cache directory, so the XLA persistent compilation "
+            "cache stays OFF and this run compiles from scratch.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 def _install_local_path_shim() -> bool:
@@ -153,26 +165,50 @@ def enable_persistent_compilation_cache(
 ) -> str | None:
     """Point JAX's persistent compilation cache at ``root`` and return the dir.
 
-    A production dark-siren startup performs ~350 XLA compilations totalling
-    ~19 s: ~100 building module-level constants at import, ~200 in the eager
-    build-time pin/KDE steps inside ``make_likelihood``, and ~33 on the first
-    likelihood call.  Cached, all of them are served from disk.  Measured on an
-    H100 NVL with the 259-event production configuration (PROD_ARGS,
-    ``--n-calls 20``): process wall 44.14 s with no cache versus 24.54 s warm
-    (-19.60 s, -44%), first call 9.95 s -> 1.78 s, cold-run penalty +0.73 s for
-    676 entries / 4.3 MB.  Spectral: 12.92 s -> 7.49 s (-5.43 s), 312 entries /
-    1.8 MB.  Per-call time is unchanged (59.6 -> 59.6 ms production, 13.8 ->
-    13.9 ms spectral, both inside the run-to-run spread) and the log-likelihood
-    at all 8 benchmark draws is byte-equal: the cache returns the SAME
-    serialized executable ``backend_compile`` produced.
+    A production dark-siren startup performs ~350 XLA compilations: ~100
+    building module-level constants at import, ~200 in the eager build-time
+    pin/KDE steps inside ``make_likelihood``, and ~33 on the first likelihood
+    call.  Cached, all of them are served from disk.  Measured on an H100 NVL
+    with the 259-event production configuration (PROD_ARGS, ``--n-calls 20``,
+    three launches per arm) on the phase timers
+    ``scripts/benchmarks/bench_likelihood_call.py`` prints: load 11.4 s / build
+    15.5 s / first call 10.3 s and 347 XLA compilations with the cache off,
+    against 11.0 / 7.8 / 1.9 s and 0 compilations warm — 37.2 s of setup down
+    to 20.7 s, 16.5 s per launch, for 676 entries / 4.3 MB.  The spectral
+    configuration goes from 7.7 s of setup and 162 compilations to 4.1 s and 0,
+    for 312 entries / 1.8 MB.  Per-call time is unchanged (production 59.4-59.6
+    ms cache-off against 59.5-59.7 ms warm over three launches each) and the
+    log-likelihood at all 8 benchmark draws is byte-equal: the cache returns the
+    SAME serialized executable ``backend_compile`` produced.
+
+    The COLD run pays for the writes, by a small but real margin: build 16.1 s
+    against cache-off builds of 15.3-15.9 s in the same sessions, +1.7 s of
+    build (~+2 s of setup) in an independent reproduction on this box, and
+    +0.73 s of process wall in the Phase-1 verifier's.  Once ``max_size`` is set,
+    ``LRUCache._evict_if_needed`` runs on every ``put`` and rescans the whole
+    directory, so the penalty grows with the entry count; it is paid once per
+    configuration and is why the cache root must be a LOCAL directory rather
+    than a network filesystem.
 
     ``jax_persistent_cache_min_compile_time_secs`` MUST be 0.0 rather than
     JAX's 1.0 s default: the ~340 small eager build-time compiles are each well
-    under a second and are exactly the ones the default throws away — measured
-    11.66 s of saving at 1.0 s against 19.60 s at 0.0.
+    under a second and are exactly the ones the default throws away — the
+    Phase-1 verifier measured 11.66 s of saving at 1.0 s against 19.60 s at 0.0
+    (those two are PROCESS wall, which also covers interpreter and import time
+    outside the phase timers quoted above).
 
     Cache errors are left non-fatal (``jax_raise_persistent_cache_errors``
-    stays at its default ``False``), so any fault degrades to a plain compile.
+    stays at its default ``False``), so any fault degrades to a plain compile;
+    a root that cannot be used warns and leaves the cache off.
+
+    Ordering matters: JAX latches its cache object on the FIRST compilation of
+    the process (``compilation_cache._initialize_cache`` returns immediately
+    once ``_cache_initialized`` is set, and ``_get_cache`` only calls it while
+    ``_cache`` is None), so pointing ``jax_compilation_cache_dir`` at a
+    directory afterwards leaves every configuration key looking correct with a
+    permanently dead cache.  Call this (or :func:`configure_jax_runtime`)
+    before the process compiles anything; when it has already latched, the
+    latch is cleared here so the next compilation picks the directory up.
     """
     import jax
 
@@ -183,6 +219,38 @@ def enable_persistent_compilation_cache(
         jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
         jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
         jax.config.update("jax_compilation_cache_max_size", int(max_size_bytes))
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            f"{XLA_CACHE_ENV} is set but the XLA persistent compilation cache "
+            f"could not be enabled at {cache_dir!r} "
+            f"({type(exc).__name__}: {exc}); this run compiles from scratch.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return None
+    reset_latched_compilation_cache()
     return cache_dir
+
+
+def reset_latched_compilation_cache() -> bool:
+    """Clear JAX's one-shot compilation-cache latch; return whether it was set.
+
+    ``jax._src.compilation_cache._initialize_cache`` sets ``_cache_initialized``
+    on the first compilation of the process and returns immediately ever after,
+    and ``_get_cache`` only re-enters it while ``_cache`` is None.  A process
+    that compiles anything before the cache directory is configured therefore
+    keeps a dead cache for its whole life, with ``jax_compilation_cache_dir``
+    set and no warning anywhere — measured: 0 entries written, against 5 for the
+    same probe in the correct order.  Resetting the latch makes the next
+    compilation re-read the configuration, which is what makes the opt-in
+    order-independent.
+    """
+    try:
+        from jax._src import compilation_cache as _cc
+
+        if not _cc._cache_initialized:
+            return False
+        _cc.reset_cache()
+        return True
+    except Exception:  # pragma: no cover - private JAX names may move
+        return False
