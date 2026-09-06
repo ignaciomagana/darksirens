@@ -103,6 +103,15 @@ prior and `_resolve_kde_window` warns at build. A second warning fires when the
 data-sized window exceeds 1024, because a dense photo-z catalog then pays for
 the exact answer.
 
+The sizing scan itself visits rows in descending galaxy-count order and stops
+once the running maximum reaches twice the largest remaining count (a row of
+`n` galaxies can contribute at most `2n`), and aliased catalog views — the
+flat-union path binds the same arrays to the PE and selection views — are
+scanned once. On the 259-event DESI nside-64 production run (H100 NVL, jax
+0.4.34) that takes the sizing step from 1.83 s to ~0.17 s and the build phase
+from 16.0 s to 13.6 s, at the same `W = 3456` and hence the same likelihood
+(max |dlogL| 0.0 across the benchmark coordinates).
+
 Measured on a DESI-like mixed spectroscopic-plus-photometric catalog (73% of
 widths in `[0.02, 0.10]`, 2158 galaxies per row), a pinned `W = 1024` moved
 `log p_cat` by 0.17 nats on average and 0.36 at worst against the full-row
