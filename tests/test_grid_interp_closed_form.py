@@ -29,7 +29,8 @@ import pytest
 from darksirens.core.types import CosmoParams, EMCatalog, SurveyParams
 from darksirens.redshift import grid as grid_mod
 from darksirens.redshift.completion import log_galaxy_measure_grid
-from darksirens.redshift.grid import _interp_zgrid, log_interp_zgrid, zMax, zgrid
+from darksirens.redshift.grid import (_interp_zgrid, log_interp_zgrid, zMax,
+                                      zgrid, zgrid_upper_index)
 
 H0, OM0, W0, WA = 70.0, 0.3, -1.0, 0.0
 _ZG = np.asarray(zgrid)
@@ -187,3 +188,89 @@ def test_dtype_promotion_matches_jnp_interp(dtype):
     got = jax.jit(lambda x: _interp_zgrid(x, fp))(z)
     want = jax.jit(lambda x: jnp.interp(x, zgrid, fp))(z)
     assert got.dtype == want.dtype
+
+
+# ---------------------------------------------------------------------------
+# ``prior._grid_bracket``: the SAME closed-form index, the other convention
+# ---------------------------------------------------------------------------
+
+def _bracket_probe_z():
+    """``_probe_z`` plus the out-of-range values ``_grid_bracket`` must survive."""
+    return np.concatenate([
+        _probe_z(),
+        np.array([np.inf, -np.inf, -1e-300, 5e-324, zMax - np.spacing(zMax),
+                  zMax + np.spacing(zMax), 2.0 * zMax, 1e300]),
+    ])
+
+
+def _old_grid_bracket(z):
+    """``_grid_bracket``'s body before the closed form, written out verbatim."""
+    idx = jnp.clip(jnp.searchsorted(zgrid, z, side="right") - 1, 0, zgrid.size - 2)
+    t = (z - zgrid[idx]) / (zgrid[idx + 1] - zgrid[idx])
+    return idx, jnp.clip(t, 0.0, 1.0)
+
+
+def test_zgrid_upper_index_matches_searchsorted():
+    """The shared helper returns the integer ``searchsorted`` returns."""
+    z = jnp.asarray(_bracket_probe_z())
+    n = _ZG.size
+    want = jnp.clip(jnp.searchsorted(zgrid, z, side="right"), 1, n - 1)
+    got = jax.jit(lambda x: zgrid_upper_index(x))(z)
+    assert np.array_equal(np.asarray(got), np.asarray(want))
+
+
+def test_grid_bracket_is_bit_identical_to_the_searchsorted_path():
+    """Index AND clipped weight, exactly -- not to a tolerance."""
+    from darksirens.redshift.prior import _grid_bracket
+
+    z = jnp.asarray(_bracket_probe_z())
+    idx, t = jax.jit(lambda x: _grid_bracket(x))(z)
+    idx_w, t_w = jax.jit(lambda x: _old_grid_bracket(x))(z)
+    assert np.array_equal(np.asarray(idx), np.asarray(idx_w))
+    assert np.array_equal(np.asarray(t), np.asarray(t_w))
+
+
+def test_grid_bracket_nan_weight_is_nan_on_both_paths():
+    """NaN z lands on a DIFFERENT index than ``searchsorted`` -- and it is inert.
+
+    The index is only ever consumed through ``_interp_row(lo, hi, t)``, whose
+    NaN ``t`` makes ``miss`` NaN and ``where(miss > 0, ...)`` -inf on both
+    paths, so only the weight has to agree.  (Production z cannot be NaN: dL is
+    clipped to the distance grid before ``z_of_dL_precomputed``.)
+    """
+    from darksirens.redshift.prior import _grid_bracket
+
+    z = jnp.asarray([np.nan])
+    n = _ZG.size
+    idx, t = jax.jit(lambda x: _grid_bracket(x))(z)
+    idx_w, t_w = jax.jit(lambda x: _old_grid_bracket(x))(z)
+    assert np.isnan(np.asarray(t)).all() and np.isnan(np.asarray(t_w)).all()
+    # Both indices stay in range, so the two-node gather is safe either way.
+    for got in (np.asarray(idx), np.asarray(idx_w)):
+        assert (got >= 0).all() and (got <= n - 2).all()
+
+
+def test_grid_bracket_escape_hatch_restores_searchsorted(monkeypatch):
+    """``DARKSIRENS_INTERP_SEARCHSORTED=1`` puts the binary search back.
+
+    The flag is read inside the helper body, so a monkeypatch before the trace
+    switches the path (that is what makes the A/B possible in one process).
+    Each arm is traced through a FRESH lambda: jax caches a trace on the
+    function object, so re-tracing ``_grid_bracket`` itself would silently
+    replay the first arm's jaxpr.
+    """
+    from darksirens.redshift.prior import _grid_bracket
+
+    z = jnp.asarray(_bracket_probe_z())
+    want_idx, want_t = jax.jit(lambda x: _old_grid_bracket(x))(z)
+
+    monkeypatch.setattr(grid_mod, "_USE_SEARCHSORTED", True)
+    idx, t = jax.jit(lambda x: _grid_bracket(x))(z)
+    assert np.array_equal(np.asarray(idx), np.asarray(want_idx))
+    assert np.array_equal(np.asarray(t), np.asarray(want_t))
+    # The hatch really is the binary search: searchsorted's default
+    # method='scan' is the ceil(log2(N))-level lax.scan the closed form removes.
+    assert "scan[" in str(jax.make_jaxpr(lambda x: _grid_bracket(x))(z))
+
+    monkeypatch.setattr(grid_mod, "_USE_SEARCHSORTED", False)
+    assert "scan[" not in str(jax.make_jaxpr(lambda x: _grid_bracket(x))(z))
