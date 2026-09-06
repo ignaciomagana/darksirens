@@ -6,6 +6,118 @@ memory you have and finish in the time you have. Every flag below is in
 (see [CLI reference](../reference/cli.md)); every number states the
 configuration it was measured on.
 
+## Campaign 2026-09-05
+
+Fourteen changes landed together on 2026-09-05. This section states what the
+composed tree costs and what it moved numerically; every other section on this
+page states ONE of those changes as an increment against the `f770956` baseline
+it was measured on, so the per-change tables below are historical and none of
+them gives the cost of the tree that ships.
+
+All numbers here: NVIDIA H100 NVL, float64, jax 0.4.34, `DARKSIRENS_ZMAX=6`, no
+XLA compilation cache, `scripts/benchmarks/bench_likelihood_call.py --n-calls
+20`, three interleaved launches per arm, medians of launch medians.
+
+| Configuration | `f770956` | this tree | Speedup | Peak device memory |
+|---|---|---|---|---|
+| 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, `zspace`-24/`ns6`, auto blocking) | 59.472 ms/call | 10.839 ms/call | 5.46x | 22.620 -> 9.923 GiB |
+| the same run on the shipped sbatch pins (`--sel_batch_size 131072 --pe_event_block 32`) | 68.829 ms/call | 22.737 ms/call | 3.03x | -> 9.923 GiB |
+| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 13.907 ms/call | 2.549 ms/call | 5.46x | 3.672 -> 0.644 GiB |
+
+Per-launch speedups were 5.405 / 5.487 / 5.507x on the auto-blocked dark-siren
+configuration and 5.440 / 5.456 / 5.517x on the spectral one. The largest
+single device allocation on the dark-siren run falls 14.746 -> 1.185 GiB.
+
+```{warning}
+**Do not pin `--sel_batch_size` or `--pe_event_block` on this tree.** The
+shipped pins cost 1.16x on `f770956` (68.829 against 59.472 ms) and cost 2.10x
+here (22.737 against 10.839 ms), and they no longer buy any memory headroom:
+peak device memory is 9.923 GiB with auto blocking and 9.923 GiB with the pins.
+`experiments/desi_full259/sbatch_ns_joint_sel.sh` still carries them.
+```
+
+### Startup and end to end
+
+The load phase falls 11.1-13.4 s to 4.4-7.4 s (the device row sort and the
+threaded chunk read). The first call goes the other way, 9.9-10.2 s to
+11.8-12.9 s on the dark-siren configuration -- 374 executables lowered against
+347 -- and 3.8 s to 4.4-4.5 s on the spectral one, so quote the two netted:
+measured inside a dynesty production launch, setup is 32.5 s against 24.0 s,
+both arms with the cache off.
+
+`DARKSIRENS_XLA_CACHE` is off unless it is exported and no measurement on this
+page used it. On the tree it was measured on, a warm cache took the dark-siren
+setup from 37.2 s to 20.7 s (676 entries, 4.3 MB) and the spectral setup from
+7.7 s to 4.1 s; the build and first-call phases are what it serves, so it
+composes with the load-phase win above rather than overlapping it.
+
+End to end under dynesty, one likelihood call including the prior transform and
+the sampler's own host work: 15.62 ms/proposal against 65.32 ms (4.18x) on the
+259-event production configuration (`nlive` 1000, seed 20260905, 4006 calls per
+arm, identical iteration counts), total wall 86.6 s against 294.2 s (3.40x),
+`logZ` -806.17593 against -806.17659. The gap between 15.62 ms/proposal here and
+10.84 ms/call in the table above is dynesty's ~6 ms of host overhead per
+proposal at this size, which this campaign does not touch. On a 20-event mock
+(`nlive` 500, `dlogz` 0.1) the same figure is 1.183 against 1.536 ms/proposal
+(1.30x), with `logZ` -158.5590 +/- 0.1535 against -158.8099 +/- 0.1513 (1.16
+sigma) and KS(H0) = 0.031 between the two posteriors -- smaller than the 0.042
+a seed change alone produces on the baseline code.
+
+### What moved numerically
+
+Twelve of the fourteen changes do not change the answer beyond rounding.
+Measured over a 25-point `H0` scan across the full [20, 140] production prior
+with every other label at its fiducial, the store-contract read, the sampler
+preflight, the KDE window scan, the shape-only reads, the XLA cache, the device
+row sort, the threaded catalog read, the one-pass mixture reduction, the
+empty-row routing and the row-width tiers move the 259-event production
+log-likelihood by at most 1.63e-09 nats on `|logL| ~ 1.9e6` -- 8.6e-16
+relative, with no `H0` correlation. The luminosity-distance inversion and the
+redshift-grid bracket are bit-identical by construction and measure 2.6e-09
+nats or less in situ.
+
+The other two are one rule change, the pairing mass-ratio normaliser: the
+200-node q-trapezoid becomes two 16-node Gauss-Legendre panels, and the upper
+panel then becomes a closed form. It reaches BOTH configurations -- `powerlaw+peak`'s `beta`
+goes through the same normaliser -- so the spectral likelihood is not
+bit-identical against `f770956` either (up to 1.582 nats at the benchmark
+draws, against up to 8.637 nats on the production one). Those are differences
+against master, not errors; both rules were then scanned against a dense
+reference built in this same tree (GL-256 per panel, plateau quadratured,
+cross-checked against a 1024-node composite to 3.0e-09 nats), scanning `H0` over
+[20, 140] with the population and survey blocks pinned:
+
+| Configuration and coordinate | 200-node trapezoid (`f770956`) | this tree |
+|---|---|---|
+| production, fiducial | 2.007e-01 nats ptp, -1.013e-01 slope x prior width | 1.089e-03 nats ptp |
+| production, worst of 13 corner coordinates | 3.7339e+03 nats at (`beta_q`, `m2_low`, `delta_m2`) = (-1.95, 3.05, 0.05) | 6.978e-02 nats at (-1.95, 3.05, 9.50), +6.26e-02 nats slope x prior width |
+| production, 25-point (`beta_q`, `delta_m2`) map at `m2_low` = 3.05 | 24 of 25 coordinates over 0.05 nats | 4 of 25 over, worst 1.1584e-01 at (-1.95, 8.00) |
+| spectral, 12 corner coordinates | worst 1.0367e+02 nats | worst 1.651e-03 nats |
+| spectral, 40 map coordinates | -- | worst 9.61e-04 nats |
+
+So the pairing rule is a correction of about four orders of magnitude
+everywhere it was measured, and the shipped trapezoid was far outside the
+0.05-nat tilt budget across most of the prior box, not only at its corners. Any
+posterior produced with the old normaliser carries that tilt wherever the chain
+visited a narrow or a wide secondary-mass taper.
+
+```{warning}
+The residual is not everywhere under budget. At low `m2_low` with a wide taper
+and a steep negative `beta_q` -- a band, not a point -- this tree still tilts
+the 259-event production log-likelihood by 7.0e-02 to 1.2e-01 nats across the
+`H0` prior, above the 0.05-nat budget. The residual belongs to the GL-16 rule
+on the TAPER panel, not to the closed plateau: raising `PAIRING_PANEL_NQ` from
+16 to 32 collapses the worst corner from 6.978e-02 to 5.164e-06 nats and the
+worst map point from 1.1584e-01 to 8.498e-06, for +0.847 ms/call (10.844 ->
+11.692 ms, 1.078x) and no change in peak device memory. That constant does not
+stand alone: `pairing_edge_nq`'s default (24) must rise with it or
+`NormalizationGridSettings` refuses the configuration at import, and
+`scripts/mock_dark_sirens/generate_mock_data.py` mirrors the same node count.
+For scale, every coordinate measured over budget sits 1.3e5 to 3.0e5 nats below
+the best point on the same scan, with the other 17 labels pinned at their
+fiducials.
+```
+
 ## What one likelihood call costs
 
 `scripts/benchmarks/bench_likelihood_call.py` builds the likelihood with the
@@ -506,6 +618,11 @@ configuration the pairing q-axis was also the dominant allocation, which is why
 the peak device memory falls 5.7x there and does not move at all on the
 auto-blocked dark-siren configuration, whose blocking is unchanged.
 
+That guidance is reversed on the composed 2026-09-05 tree: with the catalog-KDE
+changes in place the pins cost 2.10x rather than buying memory (22.737 against
+10.839 ms/call, 9.923 GiB either way). See
+[Campaign 2026-09-05](#campaign-2026-09-05).
+
 Accuracy is a **correction**, not a regression. Against a converged
 composite-Gauss-Legendre reference, holding the population and survey blocks at
 their fiducials and scanning `H0` across its full prior:
@@ -554,6 +671,13 @@ closed form's H0-coherent error there is 3e-15 nats against the GL plateau's
 1.1e-3 nats, the same for both rules. Golden log-likelihoods move
 accordingly and were re-blessed (population registry: max 7.7e-5 nats, 1.5e-5
 relative, one-sided).
+
+Read that prior-box figure as a bound on the sample it was taken over, not on
+the box. It comes from a 60-point log-spaced `m1` grid that steps over the
+narrow band just above `m_min`, where a 4000-point grid measures 5.2e-3 nats at
+the same coordinate; end to end that band is what
+[Campaign 2026-09-05](#campaign-2026-09-05) records as this tree's remaining
+7.0e-02 to 1.2e-01 nat `H0` tilt at low `m2_low`, above the 0.05-nat budget.
 
 ## The luminosity-distance inversion
 
