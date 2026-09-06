@@ -4,9 +4,19 @@ This module loads pixelated survey HDF5 files and optional per-galaxy mark
 datasets. Redshift grids live in :mod:`darksirens.redshift.grid`.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import h5py
+
+
+#: Raised by :func:`sort_survey_rows_by_z` (both implementations) when the
+#: real-galaxy prefix is not ascending after sorting; ``cli/pixelate.py``
+#: refers to this message.
+ROW_Z_SORT_INVARIANT_ERROR = (
+    "row z-sort invariant violated after sorting (NaN redshifts or "
+    "real galaxies outside the ngal prefix?)"
+)
 
 
 def _row_z_sort_order(zgals, ngals):
@@ -26,7 +36,53 @@ def _row_z_sort_order(zgals, ngals):
     return np.argsort(key, axis=1, kind="stable")
 
 
-def sort_survey_rows_by_z(zgals, dzgals, wgals, ngals, extras=()):
+def _row_z_sort_order_device(zgals, ngals):
+    """Device twin of :func:`_row_z_sort_order` (same permutation, exactly).
+
+    ``jnp.argsort(..., stable=True)`` is the same stable sort on the same
+    ``+inf``-padded key, so ties -- including every padding slot -- break by
+    column index in both implementations and the two permutations are equal
+    element for element (verified on the full production catalog).  The order
+    is returned as ``int32``: the padded width is a few thousand columns, and
+    halving the index table halves the transient device footprint of the
+    load.
+    """
+    z = jnp.asarray(zgals)
+    ng = jnp.asarray(ngals)
+    real = jnp.arange(z.shape[1])[None, :] < ng[:, None]
+    key = jnp.where(real, z, jnp.inf)
+    return jnp.argsort(key, axis=1, stable=True).astype(jnp.int32)
+
+
+def device_row_sort_admissible():
+    """Is the device row sort the FASTER implementation here, and is it exact?
+
+    ``to_device`` answers "will the caller upload these arrays", not "is there
+    an accelerator to upload them to".  Two things have to hold before the
+    device implementation is taken:
+
+    * a non-CPU backend.  On a CPU-only install XLA-CPU's ``argsort`` is
+      ~3.2x SLOWER than ``np.argsort(kind="stable")`` on production-shaped
+      rows (8,192 x 1,719 float64, x64 on, backend pre-warmed: 0.59 s numpy
+      vs 1.86 s XLA-CPU; on the full 49,152 x 1,719 production catalog
+      2.79 s vs 10.0 s, i.e. +7.2 s per ``load_survey``).  The loaders pass
+      ``to_device=True`` on a CPU box too, so without this test the change
+      would buy seconds on the GPU by paying more of them on the CPU.
+    * x64 enabled.  With it off ``jnp`` builds the sort key in float32 while
+      :func:`_row_z_sort_order` (still used by :func:`load_survey_marks` and
+      :func:`load_survey_galprops`) builds it in float64 numpy; the two
+      permutations then differ on near-ties and marks silently stop being
+      co-indexed with the galaxy arrays.  Falling back is the conservative
+      answer -- it is exactly the pre-existing behaviour -- rather than
+      raising on a call that used to work.
+
+    Both are cheap: ``load_survey(..., to_device=True)`` initializes the
+    backend a few lines later anyway.
+    """
+    return jax.default_backend() != "cpu" and bool(jax.config.jax_enable_x64)
+
+
+def sort_survey_rows_by_z(zgals, dzgals, wgals, ngals, extras=(), to_device=False):
     """Sort every padded catalog row by galaxy redshift, coherently.
 
     Applies ONE per-row permutation (from :func:`_row_z_sort_order`) to every
@@ -39,9 +95,21 @@ def sort_survey_rows_by_z(zgals, dzgals, wgals, ngals, extras=()):
     contiguous prefix, and padding follows.  The invariant is hard-asserted
     here, at construction.
 
+    ``to_device=True`` runs the identical operation on the accelerator
+    (:func:`_sort_survey_rows_by_z_device`) and returns device arrays: the
+    caller is about to upload these arrays anyway, so the sort rides along
+    instead of costing seconds of single-threaded host work first.  It does
+    so only when :func:`device_row_sort_admissible` agrees -- there is a
+    non-CPU backend and x64 is on -- because on a CPU-only install the XLA
+    path is the SLOWER of the two.  The default host path stays for callers
+    that must compact on the host before any transfer
+    (``load_survey(..., to_device=False)``) and for every CPU-only run.
+
     Returns ``(zgals, dzgals, wgals, ngals, extras)`` with extras a tuple
     (``None`` entries pass through).
     """
+    if to_device and device_row_sort_admissible():
+        return _sort_survey_rows_by_z_device(zgals, dzgals, wgals, ngals, extras)
     order = _row_z_sort_order(zgals, ngals)
 
     def _take(a):
@@ -53,10 +121,54 @@ def sort_survey_rows_by_z(zgals, dzgals, wgals, ngals, extras=()):
     cols = np.arange(1, z_s.shape[1])[None, :]
     ok = (np.diff(z_s, axis=1) >= 0) | (cols >= ng[:, None])
     if not bool(np.all(ok)):
-        raise AssertionError(
-            "row z-sort invariant violated after sorting (NaN redshifts or "
-            "real galaxies outside the ngal prefix?)"
-        )
+        raise AssertionError(ROW_Z_SORT_INVARIANT_ERROR)
+    extras_s = tuple(None if e is None else _take(e) for e in extras)
+    return z_s, _take(dzgals), _take(wgals), ng, extras_s
+
+
+def _sort_survey_rows_by_z_device(zgals, dzgals, wgals, ngals, extras=()):
+    """Device implementation of :func:`sort_survey_rows_by_z`.
+
+    Same permutation, same outputs, bit for bit -- only the machine differs:
+    the (npix, maxgals) key, the stable argsort and the gathers run on the
+    accelerator instead of one host core, and the invariant is a device
+    reduction with a single scalar transfer instead of a full-width
+    ``np.diff`` on the host.
+
+    Each source array is uploaded and gathered one at a time, and the gather
+    is blocked on before the next upload starts, so the raw buffer is
+    reclaimable as soon as its gather is done: the transient device footprint
+    stays near two copies of one array plus the int32 order, rather than
+    holding every raw and gathered array at once.
+    """
+    ng = jnp.asarray(ngals)
+    z_d = jnp.asarray(zgals)
+    if z_d.shape[0] == 0:
+        # Degenerate shape (no rows): the gather op rejects a zero-row
+        # operand, while the host path returns cleanly.  Keep the two
+        # implementations interchangeable.
+        def _up(a):
+            return None if a is None else jnp.asarray(a)
+
+        extras_up = tuple(_up(e) for e in extras)
+        return z_d, _up(dzgals), _up(wgals), ng, extras_up
+    order = _row_z_sort_order_device(z_d, ng)
+
+    def _take(a):
+        out = jnp.take_along_axis(jnp.asarray(a), order, axis=1)
+        # Block before the next upload: the raw buffer is dead at this point,
+        # so the allocator can reuse it instead of stacking a second one.
+        out.block_until_ready()
+        return out
+
+    z_s = jnp.take_along_axis(z_d, order, axis=1)
+    z_s.block_until_ready()
+    del z_d
+    # Sort invariant, asserted where it is constructed: real prefix ascending.
+    cols = jnp.arange(1, z_s.shape[1])[None, :]
+    ok = jnp.all((jnp.diff(z_s, axis=1) >= 0) | (cols >= ng[:, None]))
+    if not bool(ok):
+        raise AssertionError(ROW_Z_SORT_INVARIANT_ERROR)
     extras_s = tuple(None if e is None else _take(e) for e in extras)
     return z_s, _take(dzgals), _take(wgals), ng, extras_s
 
@@ -72,11 +184,15 @@ def load_survey(survey_path, to_device=True, sort_rows_by_z=True):
     :mod:`darksirens.redshift.completion`).  ``None`` when the attribute is
     absent (completeness estimated over the full grid; legacy path).
 
-    ``sort_rows_by_z`` (default True) applies :func:`sort_survey_rows_by_z` on
-    the host before any device transfer, establishing the per-row z-sort
-    invariant the windowed catalog-KDE hot path requires.  Per-galaxy mark
-    datasets loaded via :func:`load_survey_marks` derive the SAME permutation
-    from the file, so they stay co-indexed.  Pass False to keep the raw file
+    ``sort_rows_by_z`` (default True) applies :func:`sort_survey_rows_by_z`,
+    establishing the per-row z-sort invariant the windowed catalog-KDE hot
+    path requires.  It runs on the device when ``to_device=True`` and there
+    is an accelerator to run it on (:func:`device_row_sort_admissible`; the
+    arrays are bound for the device anyway) and on the host otherwise, so
+    callers that compact before transferring, and every CPU-only run, still
+    never touch the accelerator.  Per-galaxy mark datasets loaded via
+    :func:`load_survey_marks` derive the SAME permutation from the file, so
+    they stay co-indexed.  Pass False to keep the raw file
     order (disables KDE windowing downstream; row-reduction results are
     identical either way up to floating-point summation order).
     """
@@ -90,7 +206,7 @@ def load_survey(survey_path, to_device=True, sort_rows_by_z=True):
         z_depth = float(f.attrs['z_depth']) if 'z_depth' in f.attrs else None
     if sort_rows_by_z:
         zgals, dzgals, wgals, ngals, _ = sort_survey_rows_by_z(
-            zgals, dzgals, wgals, ngals
+            zgals, dzgals, wgals, ngals, to_device=to_device
         )
     return (
         nside, asarray(ngals), asarray(zgals), asarray(dzgals), asarray(wgals),
