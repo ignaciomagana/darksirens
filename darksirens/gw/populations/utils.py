@@ -496,10 +496,14 @@ def get_pairing_panel_quadrature():
     and four of those 25 map points exceed it -- low ``m2_low``, wide taper,
     steep negative ``beta_q``, a band inside the shipped prior rather than a
     needle.  At 32 nothing on either map, or on the spectral configuration,
-    exceeds 1e-05.  The cost, measured on an H100 NVL with the 259-event
-    production configuration: +0.85 ms per likelihood call, 10.84 -> 11.69 ms
-    (1.078x), peak device memory unchanged at 9.92 GiB.  GL-48 (3.4e-09) and a
-    4x GL-16 composite (64 nodes, 8.3e-07) buy accuracy nobody needs for another
+    exceeds 1e-05.  The cost, measured on an H100 NVL as three interleaved
+    launches per arm on the final tree, is 16 -> 32 = +1.05 ms per likelihood
+    call on the 259-event dark-siren configuration (10.869 -> 11.920 ms,
+    1.097x, peak device memory unchanged at 9.923 GiB) and +0.92 ms on the
+    259-event spectral one (2.594 -> 3.517 ms, 1.356x, peak 0.644 -> 0.772
+    GiB).  Spectral pays the larger FRACTION because that call has no catalog
+    term for the pairing work to hide behind.  GL-48 (3.4e-09) and a 4x GL-16
+    composite (64 nodes, 8.3e-07) buy accuracy nobody needs for roughly another
     1.6 ms.  A maintainer lowering this constant must re-run that scan;
     tests/test_pairing_panel_quadrature.py::test_worst_case_bound_over_the_full_prior_box
     fails at 16.
