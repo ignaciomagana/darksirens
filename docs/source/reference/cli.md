@@ -128,7 +128,7 @@ TinyNS (`--tinyns_*`) and NUTS (`--nuts_*`) options are listed under
 | `--show_progress` | BOOL | true | Print sampler progress |
 | `--dynesty_diagnostics` | BOOL | false | Write dynesty runplot/traceplot PDFs every 10 minutes |
 | `--prior_transform_dispatch` | `auto`, `eager` | `auto` | How dynesty calls the prior transform; `eager` forces the op-by-op device path |
-| `--sampler_preflight` | `on`, `off` | `on` | Probe 32 prior draws and fail fast if the likelihood is everywhere -inf |
+| `--sampler_preflight` | `on`, `off` | `on` | Probe up to 32 prior draws (stopping at the 4th finite one) and fail fast if the likelihood is everywhere -inf |
 | `--checkpoint_interval` | seconds or `off` | 1800 | Seconds between sampler checkpoints written into the run directory |
 | `--resume` | `auto`, PATH, `off` | `off` | Restore a checkpointed run; `auto` picks the newest matching checkpoint |
 | `--resume_force` | flag | off | UNSAFE: resume although `run_fingerprint.json` is missing or mismatched |

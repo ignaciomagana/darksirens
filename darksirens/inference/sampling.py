@@ -390,12 +390,19 @@ def _nested_sampler_preflight(likelihood, prior_transform, ndims, opts, n_probe=
 
     t0 = time.perf_counter()
     finite_vals = []
-    for _ in range(n_probe):
+    n_probed = 0
+    for i in range(n_probe):
         u = rng.random(ndims)
         theta = prior_transform(jnp.asarray(u))
         val = float(np.asarray(likelihood(jnp.asarray(theta))))
+        n_probed = i + 1
         if np.isfinite(val):
             finite_vals.append(val)
+            # Both verdicts below (k == 0 fail-fast, 0 < k <= 3 slow-init
+            # warning) are settled once a 4th finite draw is seen, so the
+            # remaining full-likelihood calls cannot change the outcome.
+            if len(finite_vals) > 3:
+                break
     elapsed = time.perf_counter() - t0
     k = len(finite_vals)
 
@@ -404,7 +411,7 @@ def _nested_sampler_preflight(likelihood, prior_transform, ndims, opts, n_probe=
     else:
         detail = ""
     print(
-        f"[*] preflight: {k}/{n_probe} prior draws have finite logL{detail} "
+        f"[*] preflight: {k}/{n_probed} prior draws have finite logL{detail} "
         f"[{elapsed:.2f} s]",
         flush=True,
     )
@@ -418,12 +425,13 @@ def _nested_sampler_preflight(likelihood, prior_transform, ndims, opts, n_probe=
         )
 
     if k <= 3:
+        # k <= 3 implies the loop never broke early, so n_probed == n_probe.
         nlive = int(getattr(opts, "nlive", 0) or 0)
-        frac = k / n_probe
+        frac = k / n_probed
         est = f"~{int(np.ceil(nlive / frac)):,}" if nlive > 0 else "many"
         print(
             "  [!] preflight WARNING: only "
-            f"{k}/{n_probe} prior draws are finite (finite fraction "
+            f"{k}/{n_probed} prior draws are finite (finite fraction "
             f"{100.0 * frac:.1f}%). The sampler must reject-sample about {est} "
             f"draws to seed {nlive} live points, so initialization will be "
             f"SLOW. If it stalls, consider: {remedies}",

@@ -138,8 +138,11 @@ for expensive dark-siren likelihoods; `python_debug` avoids the JAX kernel.
 Explicit `--tinyns_*` flags override the preset, and the resolved values are
 stored as `tinyns_resolved_config` in `settings.json` and `results.hdf5`.
 
-Two guards act at startup: `--sampler_preflight on` (default) probes 32 prior
-draws and fails fast if all are `-inf`, and `--selection_neff_guard auto` takes
+Two guards act at startup: `--sampler_preflight on` (default) probes up to 32
+prior draws and fails fast if all are `-inf` -- it stops at the 4th finite draw,
+since neither the fail-fast nor the slow-initialization warning can change after
+that (2.4 s saved on the 259-event production run, 0.38 s on the spectral run,
+measured on an H100 NVL) -- and `--selection_neff_guard auto` takes
 the smooth `soft` wall for `numpyro` and the hard `-inf` wall for the nested
 samplers, against `--max_likelihood_variance` (default `1.0`). See
 [Troubleshooting](troubleshooting.md).
