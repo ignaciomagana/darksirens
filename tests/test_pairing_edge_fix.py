@@ -18,6 +18,19 @@ The replacement integrates I on the SAMPLE'S OWN support with a Gauss-Legendre
 rule (``pairing_edge_nq`` nodes) wherever the node-level second difference of
 log I says linear interpolation is outside ``pairing_edge_tol``.
 
+Since 2026-09-05 that rule is the SAME two-panel split at the taper shoulder the
+exact branch uses (``PairingModel._panel_norm``), only at ``pairing_edge_nq``
+nodes per panel against the exact branch's ``PAIRING_PANEL_NQ = 16``.  That is
+what makes the headline assertion below -- the grid branch is never worse than
+the branch it approximates -- hold BY CONSTRUCTION (a strictly finer rule on an
+identical split) FOR THE SAMPLES THAT TAKE THAT RULE.  The trusted samples in
+the same sweep take ``jnp.interp`` of log I instead, which no node count
+constrains, so for them the assertion is calibration after all: the measured
+margin runs from 1.45x (m_min = 2, dm_min = 10, beta = 0 at N_grid = 2048) to
+199x.  ``pairing_edge_nq`` may not drop below ``PAIRING_PANEL_NQ``;
+``NormalizationGridSettings.__post_init__`` rejects that and
+tests/test_pairing_panel_quadrature.py pins the default.
+
 Run with ``JAX_PLATFORMS=cpu``.
 """
 import numpy as np
@@ -37,7 +50,15 @@ from darksirens.gw.populations.registry import get_model
 
 MODEL = get_model("powerlaw+peak")
 PAIR = MODEL.mixture.pairing_components[0]
-N_REF = 200001
+# COMPOSITE Gauss-Legendre reference: the same two panels the exact branch splits
+# at (taper shoulder), each subdivided into many sub-intervals carrying GL-16.
+# It replaced a 200001-node uniform trapezoid on 2026-09-05, whose own endpoint
+# deficit (1/(2 (N-1)) = 2.5e-6) had become LARGER than the error of the branch
+# it was supposed to measure.  Self-converged: doubling both counts moves it by
+# <1e-13 relative wherever N is not an underflow sliver.
+_N_SUB_A, _N_SUB_B = 256, 32
+_GLX, _GLW = np.polynomial.legendre.leggauss(16)
+_GLT, _GLWT = 0.5 * (_GLX + 1.0), 0.5 * _GLW
 
 # (m_min, dm_min, beta): the prior midpoint, the fiducial, a narrow taper at
 # both beta extremes, the lowest m_min with the widest taper, and the highest.
@@ -67,24 +88,26 @@ def _set_pairing_grid(n, **kw):
 
 
 def _reference_norm(m1, m_min, dm_min, theta, chunk=20):
-    """Converged support-relative trapezoid of the SAME integrand.
+    """Converged COMPOSITE Gauss-Legendre integral of the SAME integrand.
 
-    ``N_REF = 200001`` nodes: 1000x the exact branch's n_q, which is what it
-    takes to resolve the taper boundary layer inside the edge cell (the exact
-    branch itself is 3.1e-2 off there -- see the module note)."""
-    t = jnp.linspace(0.0, 1.0, N_REF)
-    out = np.empty(np.shape(m1))
-    for s in range(0, np.size(m1), chunk):
-        mm = jnp.asarray(np.asarray(m1)[s:s + chunk])
-        q_cut = jnp.clip(m_min / mm, 0.0, 1.0)
-        width = 1.0 - q_cut
-        q_n = q_cut[:, None] + t * width[:, None]
-        p = PAIR._eval_unnorm(mm[:, None], q_n, m_min, dm_min, theta)
-        sc = jnp.max(p, axis=-1, keepdims=True)
-        sc = jnp.where(sc > 0, sc, 1.0)
-        out[s:s + chunk] = np.asarray(
-            jnp.trapezoid(p / sc, dx=1.0 / (N_REF - 1), axis=-1) * width
-            * sc[:, 0])
+    Panel A ``[q_cut, q_a]`` in ``_N_SUB_A`` sub-intervals and panel B
+    ``[q_a, 1]`` in ``_N_SUB_B``, GL-16 on each: ~4600 nodes, but placed so that
+    the taper boundary layer inside the edge cell is actually resolved.  A
+    uniform trapezoid needs ~1e5 nodes to get there and still carries a
+    2.5e-6 endpoint deficit, which is above the error of the rule under test."""
+    m1 = np.atleast_1d(np.asarray(m1, dtype=float))
+    q_cut = np.clip(m_min / m1, 0.0, 1.0)
+    q_a = np.clip((m_min + dm_min) / m1, q_cut, 1.0)
+    out = np.zeros(m1.shape)
+    for lo, hi, n_sub in ((q_cut, q_a, _N_SUB_A), (q_a, np.ones_like(q_a), _N_SUB_B)):
+        edges = lo[:, None] + (hi - lo)[:, None] * np.linspace(0.0, 1.0, n_sub + 1)
+        h = np.diff(edges, axis=1)
+        for s in range(0, m1.size, chunk):
+            sl = slice(s, s + chunk)
+            q_n = edges[sl, :-1, None] + h[sl, :, None] * _GLT
+            p = np.asarray(PAIR._eval_unnorm(jnp.asarray(m1[sl])[:, None, None],
+                                             jnp.asarray(q_n), m_min, dm_min, theta))
+            out[sl] += np.sum(np.sum(p * _GLWT, axis=-1) * h[sl], axis=-1)
     return out
 
 
@@ -124,7 +147,7 @@ def test_support_edge_tracks_a_converged_reference(n_grid, capsys):
         rows.append((m_min, dm_min, beta, e_grid, e_exact))
     with capsys.disabled():
         print(f"\n[pairing_edge_fix] N_grid={n_grid}: max |Delta log p(q|m1)| "
-              f"over the 24 cells above m_min, vs a {N_REF}-node reference "
+              f"over the 24 cells above m_min, vs a composite-GL reference "
               f"(pre-fix: up to 22.6 nats)")
         for m_min, dm_min, beta, eg, ee in rows:
             print(f"    m_min={m_min:5} dm={dm_min:6} beta={beta:5}: "
@@ -195,7 +218,7 @@ def test_edge_cell_gradients_track_the_exact_branch():
 
 def test_edge_quadrature_settings_validate_and_reconfigure():
     s = U.normalization_grid_settings()
-    assert s.pairing_edge_nq >= 2 and s.pairing_edge_tol > 0.0
+    assert s.pairing_edge_nq >= U.PAIRING_PANEL_NQ and s.pairing_edge_tol > 0.0
     t, w = U._gauss_legendre_01(s.pairing_edge_nq)
     assert t.shape == w.shape == (s.pairing_edge_nq,)
     # open interval, unit total weight, symmetric
@@ -203,12 +226,17 @@ def test_edge_quadrature_settings_validate_and_reconfigure():
     np.testing.assert_allclose(float(w.sum()), 1.0, rtol=0, atol=1e-14)
     with pytest.raises(ValueError):
         _dc_replace(U._NORMALIZATION_GRID_SETTINGS, pairing_edge_nq=1)
+    # A rule COARSER than the exact branch's own panel rule would invert the
+    # invariant this file asserts, so the floor is PAIRING_PANEL_NQ, not 2.
+    with pytest.raises(ValueError, match="PAIRING_PANEL_NQ"):
+        _dc_replace(U._NORMALIZATION_GRID_SETTINGS,
+                    pairing_edge_nq=U.PAIRING_PANEL_NQ - 1)
     with pytest.raises(ValueError):
         _dc_replace(U._NORMALIZATION_GRID_SETTINGS, pairing_edge_tol=0.0)
-    got = U.configure_normalization_grids(pairing_edge_nq=12,
+    got = U.configure_normalization_grids(pairing_edge_nq=32,
                                           pairing_edge_tol=1e-3)
-    assert got.pairing_edge_nq == 12 and got.pairing_edge_tol == 1e-3
-    assert U.get_pairing_edge_quadrature()[0].shape == (12,)
+    assert got.pairing_edge_nq == 32 and got.pairing_edge_tol == 1e-3
+    assert U.get_pairing_edge_quadrature()[0].shape == (32,)
 
 
 def test_edge_quadrature_cold_cache_does_not_leak_tracers():

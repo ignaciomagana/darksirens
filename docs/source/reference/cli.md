@@ -141,7 +141,7 @@ TinyNS (`--tinyns_*`) and NUTS (`--nuts_*`) options are listed under
 | `--pe_event_block` | N, `auto`, `off` | `auto` | Events per PE-reduction chunk; `off` keeps one vectorized block |
 | `--drop_full_catalog` | BOOL | false | Discard the dense full-sky galaxy arrays after compacting to inference pixels |
 | `--norm_nmass` | int | env / module | Mass-grid size for GW-population normalisation (`DARKSIRENS_GW_N_MASS`) |
-| `--norm_nq` | int | env / module | Mass-ratio-grid size for GW-population normalisation (`DARKSIRENS_GW_N_Q`) |
+| `--norm_nq` | int | env / module | Mass-ratio-grid size for the GP baselines and the stratified-q normalisation (`DARKSIRENS_GW_N_Q`); it no longer sizes the pairing normaliser (fixed two-panel Gauss-Legendre rule) |
 | `--norm_nchi` | int | env / module | Spin-grid size for GW-population normalisation (`DARKSIRENS_GW_N_CHI`) |
 | `--pairing_norm_grid` | int | exact | Interpolate the pairing q-normalization from an N-node log-spaced m1 grid |
 | `--kernel_gl_nodes` | int | 24 | Gauss-Legendre nodes for the per-galaxy kernel normalisation Z_i |
@@ -262,7 +262,7 @@ TinyNS and NUTS options are listed under
 | `--sel_batch_size` | N, `auto`, `off` | `auto` | Injections per selection-integral chunk; `off` forces a single pass |
 | `--pe_event_block` | N, `auto`, `off` | `auto` | Singletons per vectorized PE-reduction chunk; 1 reproduces the per-event scan |
 | `--norm_nmass` | int | env / module | Mass-grid size for GW-population normalisation (`DARKSIRENS_GW_N_MASS`) |
-| `--norm_nq` | int | env / module | Mass-ratio-grid size for GW-population normalisation (`DARKSIRENS_GW_N_Q`) |
+| `--norm_nq` | int | env / module | Mass-ratio-grid size for the GP baselines and the stratified-q normalisation (`DARKSIRENS_GW_N_Q`); it no longer sizes the pairing normaliser (fixed two-panel Gauss-Legendre rule) |
 | `--norm_nchi` | int | env / module | Spin-grid size for GW-population normalisation (`DARKSIRENS_GW_N_CHI`) |
 | `--pairing_norm_grid` | int | exact | Interpolate the pairing q-normalization from an N-node log-spaced m1 grid |
 
