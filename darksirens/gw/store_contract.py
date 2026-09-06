@@ -43,7 +43,9 @@ at least the number of detected rows it is the denominator for.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
+from math import prod
 from typing import Any, Mapping
 
 import numpy as np
@@ -299,6 +301,71 @@ def _length_checked_names(f: Any, contract: StoreContract) -> list[str]:
     return names
 
 
+def _shape_of(f: Any, name: str) -> tuple[int, ...]:
+    """The shape of ``f[name]`` WITHOUT materialising its data.
+
+    A shape test needs no bytes: an ``h5py.Dataset`` carries ``.shape`` in the
+    file's metadata, and reading the column instead costs a full gzip
+    decompression (measured 42.5 ms per 1.07e6-row selection column, and this
+    module walks every column twice).  Plain mappings of ndarrays -- which
+    both validators also accept -- answer ``.shape`` for free; anything else
+    (a list, say) still falls back to ``np.asarray``.
+    """
+    value = f[name]
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        shape = np.asarray(value).shape
+    return tuple(shape)
+
+
+class ColumnView(MappingABC):
+    """The store's columns read ONCE, still answering ``.attrs``.
+
+    :func:`quality_problems` accepts "any mapping of 1-D arrays with an
+    ``attrs`` mapping"; handing it one of these instead of the open
+    ``h5py.File`` makes the validators and the loader that follows them share
+    a single read per dataset rather than each decompressing the file anew
+    (measured 49 full-dataset reads for the 9 selection columns).
+    """
+
+    def __init__(self, columns: Mapping[str, np.ndarray], attrs: Mapping[str, Any]):
+        self._columns = dict(columns)
+        self.attrs = attrs
+
+    def __getitem__(self, name: str) -> np.ndarray:
+        return self._columns[name]
+
+    def __iter__(self):
+        return iter(self._columns)
+
+    def __len__(self) -> int:
+        return len(self._columns)
+
+
+def read_columns(f: Any, contract: StoreContract) -> ColumnView:
+    """Materialise every column this module's gates and the loaders read.
+
+    Only names PRESENT in ``f`` are read, so a missing dataset still reaches
+    the gate that owns its error message, and ``np.asarray`` is used verbatim
+    (no reshape/astype) so a malformed 2-D or scalar column still arrives at
+    :func:`layout_problems` exactly as it does when read straight from the
+    file.
+    """
+    names: list[str] = list(_length_checked_names(f, contract))
+    for extra in (
+        contract.finite,
+        contract.positive,
+        contract.nonnegative,
+        tuple(contract.ranges),
+        tuple(n for pair in contract.ordered_masses for n in pair),
+    ):
+        names += [name for name in extra if name not in names]
+    return ColumnView(
+        {name: np.asarray(f[name]) for name in names if name in f},
+        f.attrs,
+    )
+
+
 def layout_problems(
     f: Any,
     contract: StoreContract,
@@ -319,14 +386,14 @@ def layout_problems(
     for name in _length_checked_names(f, contract):
         if name not in f:
             continue
-        arr = np.asarray(f[name])
-        if arr.ndim != 1:
+        shape = _shape_of(f, name)
+        if len(shape) != 1:
             problems.append(
-                f"dataset {name!r} has shape {tuple(arr.shape)}; store "
+                f"dataset {name!r} has shape {shape}; store "
                 "columns must be one-dimensional"
             )
             continue
-        sizes[name] = int(arr.size)
+        sizes[name] = int(shape[0])
     if problems:
         return problems
     if expected_size is not None:
@@ -356,7 +423,7 @@ def common_length(f: Any, contract: StoreContract) -> int:
     store with no length-checked column present.
     """
     sizes = {
-        int(np.asarray(f[name]).size)
+        int(prod(_shape_of(f, name)))
         for name in _length_checked_names(f, contract)
         if name in f
     }
