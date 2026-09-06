@@ -233,6 +233,9 @@ Measured on an H100 NVL with `scripts/benchmarks/bench_likelihood_call.py
 --n-calls 20`, 259-event DESI nside-64 production configuration (H0 +
 population + survey sampled, `zspace`-24/`ns6` quadrature, auto blocking),
 five launches per arm across two sessions:
+(the `load` column below predates the device row sort described in the next
+section, which takes ~2.5 s off it in every arm; `build`, `first call` and the
+call medians are unaffected)
 
 | Arm | load | build | first call | XLA compiles | call median |
 |---|---|---|---|---|---|
@@ -284,3 +287,50 @@ as clean while still paying a lowering, a cache read and a deserialize on every
 call (measured on a CPU probe: a four-shape loop is 6 compilations cold and 0
 compilations / 6 compile requests warm). The summary JSON is written before the
 guard exits, so a tripped run still leaves its evidence.
+
+## Startup: the catalog row sort runs where the catalog lands
+
+`load_survey` establishes the per-row z-sort invariant the windowed catalog
+KDE depends on: one stable per-row permutation of the padded `(npix, maxgals)`
+catalog, applied to `zgals` / `dzgals` / `wgals`. On the 259-event DESI
+nside-64 catalog that is a 49,152 x 1,719 float64 key, an argsort over 84.5M
+elements and three 676 MB gathers.
+
+When the arrays are bound for the accelerator anyway
+(`load_survey(..., to_device=True)`, the default and the production path), the
+sort now runs there instead of on one host core: the raw arrays go up first,
+`jnp.argsort(..., stable=True)` builds the permutation as `int32`, and three
+`jnp.take_along_axis` gathers apply it, one array at a time so the raw upload
+of each is released as soon as its gather is done. The invariant is a device
+reduction with one scalar transfer rather than a full-width `np.diff` on the
+host. Callers that compact on the host before transferring
+(`--drop_full_catalog`, the multitracer bundles, the selection-function fit)
+pass `to_device=False` and keep the numpy implementation unchanged.
+
+Both implementations run the same stable sort on the same `+inf`-padded key, so
+they produce the same permutation, tie for tie, and therefore the same bytes:
+verified with `np.array_equal` on the permutation and on all three sorted
+arrays over the full 49,152 x 1,719 production catalog, and the log-likelihood
+at all eight benchmark draws is byte-equal between the two arms.
+
+Measured on an H100 NVL with `scripts/benchmarks/bench_likelihood_call.py
+--n-calls 20`, 259-event DESI nside-64 production configuration (H0 +
+population + survey sampled, `zspace`-24/`ns6` quadrature, auto blocking, no
+XLA cache), three launches per arm, one arm per process:
+
+| Arm | row sort | `load_survey` | load phase | call median |
+|---|---|---|---|---|
+| host (numpy) | 2.73-2.85 s | 8.03-8.20 s | 10.9-11.1 s | 59.4-59.6 ms |
+| device | 1.09-1.11 s | 5.68-5.76 s | 8.5-8.6 s | 59.6-59.7 ms |
+
+That is -2.5 s of the load phase, 23% of it. The device sort's own 1.1 s is not
+the cost of the sort -- warm, the four device ops take 15 ms -- it is the CUDA
+backend initialization and first-op compilation that the host arm instead pays
+a few lines later on the first `jnp.asarray`. The right figure to quote is the
+`load_survey` or load-phase delta, not the sort-level one.
+
+Per-call time is untouched (the hot path never sees this code), and so is the
+block-size plan: both arms report `auto-single-pass` with `free 67.6 GiB` and
+the same 22.6 GiB peak device memory, because the transients of the sort are
+dead long before the planner probes. The spectral configuration carries no
+`--survey_path` and never reaches `load_survey`, so nothing about it changes.

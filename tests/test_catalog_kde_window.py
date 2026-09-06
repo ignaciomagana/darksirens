@@ -29,6 +29,9 @@ from darksirens.redshift.catalog import (
     recommended_kde_window,
 )
 from darksirens.catalogs.io import (
+    ROW_Z_SORT_INVARIANT_ERROR,
+    _row_z_sort_order,
+    _row_z_sort_order_device,
     load_survey,
     load_survey_marks,
     sort_survey_rows_by_z,
@@ -155,6 +158,72 @@ def test_sort_permutes_every_coindexed_array_coherently():
         before = sorted(zip(zg[r, :n], dz[r, :n], wg[r, :n], mark[r, :n]))
         after = sorted(zip(zs[r, :n], dzs[r, :n], wss[r, :n], mark_s[r, :n]))
         assert before == after
+
+
+def test_device_sort_is_byte_identical_to_the_host_sort():
+    """to_device=True must be the SAME permutation and the SAME bytes.
+
+    The device path is a permutation plus gathers -- no arithmetic on the
+    values -- and both implementations run a stable sort on the same
+    ``+inf``-padded key, so ties (every padding slot included) break by column
+    index in both.  Anything weaker than byte equality here would move the
+    likelihood.
+    """
+    rng = np.random.default_rng(3141)
+    zg, dz, wg, ng = _raw_mock(rng, n_gal=200, n_max=230)
+    mark = rng.normal(size=zg.shape)
+
+    order_h = _row_z_sort_order(zg, ng)
+    order_d = np.asarray(_row_z_sort_order_device(zg, ng))
+    assert order_d.dtype == np.int32  # halves the transient device index table
+    assert np.array_equal(order_d.astype(np.int64), order_h)
+
+    host = sort_survey_rows_by_z(zg, dz, wg, ng, extras=(mark, None))
+    dev = sort_survey_rows_by_z(
+        zg, dz, wg, ng, extras=(mark, None), to_device=True
+    )
+    for a, b in zip(host[:4], dev[:4]):
+        assert np.array_equal(np.asarray(b), np.asarray(a))
+    assert dev[4][1] is None
+    assert np.array_equal(np.asarray(dev[4][0]), host[4][0])
+    for arr in dev[:3]:
+        assert isinstance(arr, jax.Array)
+
+
+def test_device_sort_asserts_on_nan_redshift():
+    """The invariant check is a device reduce, not a dropped check."""
+    rng = np.random.default_rng(4)
+    zg, dz, wg, ng = _raw_mock(rng, n_gal=50, n_max=60)
+    zg[0, 3] = np.nan
+    with pytest.raises(AssertionError, match="row z-sort invariant violated"):
+        sort_survey_rows_by_z(zg, dz, wg, ng, to_device=True)
+    with pytest.raises(AssertionError) as exc:
+        sort_survey_rows_by_z(zg, dz, wg, ng)
+    assert str(exc.value) == ROW_Z_SORT_INVARIANT_ERROR
+
+
+def test_load_survey_device_and_host_paths_agree_bitwise(tmp_path):
+    """load_survey routes the sort to the device only when it uploads."""
+    rng = np.random.default_rng(2718)
+    zg, dz, wg, ng = _raw_mock(rng, n_gal=120, n_max=140)
+    path = os.path.join(tmp_path, "survey.hdf5")
+    with h5py.File(path, "w") as f:
+        f.attrs["nside"] = 16
+        f.create_dataset("zgals", data=zg)
+        f.create_dataset("dzgals", data=dz)
+        f.create_dataset("wgals", data=wg)
+        f.create_dataset("ngals", data=ng)
+
+    host = load_survey(path, to_device=False)
+    dev = load_survey(path, to_device=True)
+    assert host[0] == dev[0] and host[5] == dev[5]
+    for a, b in zip(host[1:5], dev[1:5]):
+        assert np.array_equal(np.asarray(b), np.asarray(a))
+
+    # marks re-derive the permutation on the host and stay co-indexed with
+    # the device-sorted galaxy arrays.
+    order = _row_z_sort_order(zg, ng)
+    assert np.array_equal(np.asarray(dev[2]), np.take_along_axis(zg, order, axis=1))
 
 
 def test_sort_asserts_on_nan_redshift():
