@@ -56,6 +56,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import jax  # noqa: E402
 jax.config.update("jax_enable_x64", True)
+
+# Recompile guard: ``jax._src.compiler.compile_or_get_cached`` calls this module
+# global, so one patch counts every XLA compilation (a persistent-cache HIT does
+# NOT call it).  A candidate that leaks a Python-side shape or static argument
+# into the sampler's inner loop recompiles per call; today that shows up only as
+# a fat, noisy median, which is indistinguishable from a slow kernel.  Counting
+# compilations inside the timed loop names it directly.
+import jax._src.compiler as _jax_compiler  # noqa: E402
+
+_COMPILES = [0]
+_backend_compile_orig = _jax_compiler.backend_compile
+
+
+def _counting_backend_compile(*args, **kwargs):
+    _COMPILES[0] += 1
+    return _backend_compile_orig(*args, **kwargs)
+
+
+_jax_compiler.backend_compile = _counting_backend_compile
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -264,6 +283,9 @@ def main():
     ap.add_argument("--compare", default=None, help="a previous --out json to compare values/speed against")
     ap.add_argument("--components", action="store_true", help="also time the components in isolation")
     ap.add_argument("--verbose", action="store_true", help="show the CLI's own build output")
+    ap.add_argument("--recompile-guard", action="store_true",
+                    help="exit nonzero if ANY XLA compilation happens inside the timed loop "
+                         "(a per-call shape/static-argument leak)")
     ap.add_argument("rest", nargs=argparse.REMAINDER, help="-- <darksirens_inference args>")
     a = ap.parse_args()
     cli_args = [x for x in a.rest if x != "--"]
@@ -278,6 +300,7 @@ def main():
     for c in coords[:3]:
         jax.block_until_ready(likelihood(jnp.asarray(c)))
 
+    compiles_before_loop = _COMPILES[0]
     times, values = [], {}
     for i in range(a.n_calls):
         k = i % len(coords)
@@ -301,6 +324,9 @@ def main():
         "t_load_s": b.t_load, "t_build_s": b.t_build, "t_first_call_s": t_first,
         "t_call_median_s": float(np.median(times)), "t_call_min_s": float(np.min(times)),
         "t_call_mean_s": float(np.mean(times)), "t_call_std_s": float(np.std(times)),
+        "compiles_total": _COMPILES[0],
+        "compiles_in_timed_loop": _COMPILES[0] - compiles_before_loop,
+        "xla_cache_dir": jax.config.jax_compilation_cache_dir,
         "values": [values[k] for k in sorted(values)],
         "coords": coords.tolist(),
     }
@@ -313,6 +339,9 @@ def main():
     print(f"  load {b.t_load:.1f}s  build {b.t_build:.1f}s  first call (compile+run) {t_first:.1f}s")
     print(f"  call: median {np.median(times) * 1e3:.1f} ms  min {np.min(times) * 1e3:.1f} ms  "
           f"mean {np.mean(times) * 1e3:.1f} +- {np.std(times) * 1e3:.1f} ms  (n={a.n_calls})")
+    print(f"  compiles: {summary['compiles_total']} total, "
+          f"{summary['compiles_in_timed_loop']} inside the timed loop  "
+          f"xla_cache_dir={summary['xla_cache_dir']}")
     print(f"  values: {summary['values']}")
     if a.compare:
         base = json.load(open(a.compare))
@@ -335,6 +364,10 @@ def main():
     if a.out:
         with open(a.out, "w") as f:
             json.dump(summary, f, indent=1)
+    if a.recompile_guard and summary["compiles_in_timed_loop"]:
+        raise SystemExit(
+            f"recompile guard: {summary['compiles_in_timed_loop']} XLA compilation(s) "
+            f"inside the timed loop -- the likelihood is recompiling per call")
 
 
 if __name__ == "__main__":

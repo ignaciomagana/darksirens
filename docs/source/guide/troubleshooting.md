@@ -14,6 +14,7 @@ do you change. Flags are documented in [Inference](inference.md),
 | `KeyError` on a raw survey file | `darksirens_pixelate` requires `TARGET_RA`, `TARGET_DEC`, `Z`, `ZERR`, `WEIGHT` | rename the datasets in the input file |
 | `KeyError` on a pixelated survey file | `--survey_path` files must carry `zgals`, `dzgals`, `wgals`, `ngals` and the `nside` attribute | re-run `darksirens_pixelate` on the raw table |
 | `ZERR must be finite and non-negative` / `WEIGHT must be finite and strictly positive` | failure sentinels (`Z = -1`, `ZERR = -1`) survived into the raw table | drop the failed rows before pixelating |
+| every launch spends ~19 s compiling before the first live point | the XLA compilation cache is opt-in | export `DARKSIRENS_XLA_CACHE=<local dir>` (see [Performance](performance.md)); entries go to `<dir>/<host>-jaxlib<version>/` |
 
 ## Memory
 
@@ -42,6 +43,7 @@ See [Performance](performance.md) for what each block-size knob costs.
 | `--kde_window <W> is below the data-sized window <N>` | a pinned window is centred by index and never repositioned, so it truncates the in-range galaxy block on the densest rows and the catalog prior is wrong, not just cheaper | unset `--kde_window` to size from the data, or pin at or above the reported `N` |
 | `catalog KDE window sized from the data: <N> galaxies` with `N > 1024` | a dense photo-z catalog needs a wide window for the exact answer | nothing is wrong; budget the per-sample cost, or trade accuracy deliberately with `--kde_window` |
 | `pair y-quadrature:` a delta above tolerance between 32 and 128 nodes | the SIS pair integrand is peaked and its Gauss-Legendre convergence is pair-dependent | raise `--y_nodes_pair` when the delta is comparable to the evidence difference being measured |
+| `Error reading persistent compilation cache entry ... No module named 'importlib_resources'` | `DARKSIRENS_XLA_CACHE` was set but the cache shim did not run (JAX reaches its cache through `etils.epath`, which needs a package the pinned environment does not have) | enable the cache through `configure_jax_runtime` rather than by setting `jax_compilation_cache_dir` yourself |
 | `DeprecationWarning` naming a population model | old spellings such as `twopowerlaws+peak` or `gwtc5_fiducial_brokenpowerlaw+2peaks` still resolve | switch to the canonical name (`2powerlaws+peak`, `gwtc5_fiducial_bpl2peaks`); saved `settings.json` and HDF5 `pop_model` attributes with old names stay readable |
 
 ## Refusals from the lensing CLI

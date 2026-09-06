@@ -208,3 +208,56 @@ an H100 NVL), that allocator cost 23.0 ms/call against BFC's 13.7 ms (1.68x).
 
 For an OOM that survives all of the above, see
 [Troubleshooting](troubleshooting.md).
+
+## Startup: the XLA compilation cache
+
+A production dark-siren startup compiles ~350 XLA modules before the sampler's
+first live point: ~100 building module-level constants at import, ~200 in the
+eager build-time pin/KDE steps inside `make_likelihood`, and ~33 on the first
+likelihood call. JAX can serve all of them from disk instead. Set
+`DARKSIRENS_XLA_CACHE` to a local directory to opt in:
+
+```bash
+export DARKSIRENS_XLA_CACHE=$SCRATCH/darksirens-xla
+```
+
+Unset or empty (the default) leaves the cache off and nothing about the run
+changes. Entries land in `$DARKSIRENS_XLA_CACHE/<host>-jaxlib<version>/`, one
+subdirectory per host and JAX build, and the size is bounded by
+`jax_compilation_cache_max_size` (2 GiB, set in
+`darksirens.core.jax_config`; any value other than `-1` is also what puts a
+`filelock` around the cache writes, which is what makes it safe for two jobs on
+one box).
+
+Measured on an H100 NVL with `scripts/benchmarks/bench_likelihood_call.py
+--n-calls 20`, 259-event DESI nside-64 production configuration (H0 +
+population + survey sampled, `zspace`-24/`ns6` quadrature, auto blocking),
+three launches per arm:
+
+| Arm | load | build | first call | XLA compiles | call median |
+|---|---|---|---|---|---|
+| cache off | 11.4 s | 15.5 s | 10.3 s | 347 | 59.6 ms |
+| cold (writes the cache) | 11.5 s | 16.1 s | 10.0 s | 338 | 59.7 ms |
+| warm | 11.0 s | 7.8 s | 1.9 s | 0 | 59.5 ms |
+
+That is 37.2 s of setup against 20.7 s warm, 16.5 s saved per launch, for
+676 entries / 4.3 MB on disk. The 259-event spectral configuration goes from
+7.7 s of setup (162 compiles) to 4.1 s (0 compiles), 3.6 s saved, for
+312 entries / 1.8 MB. The cold run pays nothing measurable.
+
+Per-call time is untouched — the cache returns the same serialized executable
+`backend_compile` produced, keyed on the HLO module plus the jaxlib version,
+backend, compile options and device kind, so a mismatched entry cannot be
+served. The log-likelihood at all eight benchmark draws is byte-equal warm
+against cache-off, on both configurations. Any change to the graph simply
+misses the cache and compiles.
+
+So this is worth ~0.03% of a 1e6-call production dynesty wall and roughly half
+the wall of a smoke run or a repeated benchmark launch.
+
+`bench_likelihood_call.py` reports `compiles: <N> total, <M> inside the timed
+loop  xla_cache_dir=<dir>`, so a benchmark JSON records which cache state it
+was measured in; never share one cache directory between the two arms of a
+timed A/B. `--recompile-guard` exits nonzero if any compilation happens inside
+the timed loop, which is how a per-call shape or static-argument leak is caught
+as itself rather than as a fat, noisy median.
