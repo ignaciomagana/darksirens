@@ -284,6 +284,63 @@ closed form's H0-coherent error there is 3e-15 nats against the GL plateau's
 accordingly and were re-blessed (population registry: max 7.7e-5 nats, 1.5e-5
 relative, one-sided).
 
+## The luminosity-distance inversion
+
+Every call inverts `dL -> z` twice in the dark-siren and spectral
+configurations — once for the PE samples, once for the selection injections —
+by interpolating the per-proposal `dL_grid` (`z_of_dL_precomputed`,
+`darksirens/utils/cosmology.py`); the cluster and weak-lensing paths call the
+same inversion at more sites, so what follows is the two-site case. `jnp.interp`
+finds the bracketing node with `searchsorted(side='right')` at JAX's
+module-default `method='scan'`, a serial `ceil(log2 N)`-level `lax.scan` (10
+levels for the 543-node `zgrid` at `DARKSIRENS_ZMAX=6`). On a GPU that lowers to
+a `while` op XLA cannot fuse through, so it also splits the surrounding
+per-sample kernel in two.
+
+`z_of_dL_precomputed` therefore spells the interpolation out — jax 0.4.34's own
+`_interp` body, expression for expression, including the `dx0` zero-width-cell
+guard, the two out-of-range fills and the `shape(xp) != shape(fp)` fail-fast —
+and asks for `method='scan_unrolled'`, which lowers the same binary search to
+straight-line code that fuses into the neighbouring memory-bound work. The
+method selects only **how** the insertion index is found, never which index, so
+the result is **bit-identical**; the `in_grid` mask that returns `NaN` outside
+the grid is unchanged. `DARKSIRENS_INTERP_SCAN=1` (read once at import) restores
+the stock `jnp.interp` call for an A/B.
+
+Measured on an NVIDIA H100 NVL, float64, `DARKSIRENS_ZMAX=6`, 20 warm calls per
+launch, three launches per arm interleaved inside one lock hold. `Before` is the
+head of the pairing-normaliser change above; both columns are the MEAN of the
+three launch medians, and `Saving` is the launch-paired difference, which is the
+quantity this design resolves:
+
+| Configuration | Before | After | Saving | Speedup | Peak device memory |
+|---|---|---|---|---|---|
+| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 2.778 ms/call | 2.403 ms/call | -0.375 ± 0.016 ms | 1.16x | 0.640 -> 0.644 GiB |
+| 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 46.453 ms/call | 46.163 ms/call | -0.290 ± 0.052 ms | 1.006x | 22.620 -> 22.637 GiB |
+
+Per-launch medians were 2.572 / 2.872 / 2.891 ms against 2.167 / 2.519 / 2.523
+ms on the spectral configuration and 46.439 / 46.502 / 46.419 ms against 46.208
+/ 46.106 / 46.174 ms on the dark-siren one. The saving is the same fixed
+0.2-0.4 ms in both, because it is the same two inversions: 13.5% of the spectral
+call, 0.6% of the dark-siren one. A second, independent interleaved A/B (three
+launches per arm spectral, two production, 25-30 warm calls per launch, launch
+order rotated) reproduced -0.334 ms / 1.13x on the spectral configuration and
+-0.18 ms / 1.004x on the dark-siren one, so read the dark-siren row as -0.18 to
+-0.29 ms (0.4-0.6%): that is at this box's 0.3 ms process-to-process drift, and
+only the launch pairing resolves it — the sign is consistent across all five
+pairs. That run also measured the third arm: the same candidate build with
+`DARKSIRENS_INTERP_SCAN=1` lands back on the base (2.849 against 2.825 ms
+spectral), which pins the whole saving on the `searchsorted` lowering and none
+of it on the surrounding restructure.
+
+The log-likelihoods are equal bit for bit at every benchmark coordinate in both
+configurations (`max |dlogL| = 0`, identical `-inf` pattern), and at eight
+fiducial coordinates per configuration.
+
+The unroll is paid for in compile time and in live intermediates, both small:
+`t_first_call` 3.9-5.6 s -> 4.4-6.7 s on the spectral build and 10.0-10.3 s ->
+10.5-10.9 s on the dark-siren one (one-time per run, against 1e5-1e6 calls, and
+measured for the two-site case), and the peak-memory column above.
 ## Lensing
 
 Under `--partition_mode marginalize_exact` the lensing CLI makes ONE call to
