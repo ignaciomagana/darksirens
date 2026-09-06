@@ -142,15 +142,16 @@ def _sample_sky(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarra
 # tests/test_mock_generator_taper.py asserts they match the jax originals).
 _trapz = _trapezoid
 
-# Normalisation grids mirror the inference defaults EXACTLY: mass on [1, 200]
-# Msun with N_MASS=500 nodes and mass ratio on [0, 1] with N_Q=200 nodes, i.e.
-# the same linspaces darksirens.gw.populations.utils.get_mass_grid() /
-# get_q_grid() build from the default NormalizationGridSettings (n_mass=500,
-# n_q=200, m_lo=1, m_hi=200, q_lo=0, q_hi=1).  Densities are normalised on these
-# grids so the stored ``pdraw`` is exactly the density the samplers draw from AND
-# is bit-for-bit the same trapezoid the inference uses -- the mock's mass/pair
-# component densities then match the inference model to machine precision (cf.
-# tests/test_mock_generator_taper.py::test_pairing_matches_inference_component_densities).
+# The MASS normalisation grid mirrors the inference default EXACTLY: [1, 200]
+# Msun with N_MASS=500 nodes, i.e. the same linspace
+# darksirens.gw.populations.utils.get_mass_grid() builds from the default
+# NormalizationGridSettings (n_mass=500, m_lo=1, m_hi=200).  The mass density is
+# normalised on that grid so the stored ``pdraw`` is exactly the density the
+# samplers draw from AND is bit-for-bit the same trapezoid the inference uses --
+# the mock's mass/pair component densities then match the inference model to
+# machine precision (cf. tests/test_mock_generator_taper.py::
+# test_pairing_matches_inference_component_densities).  The MASS-RATIO axis is
+# no longer a grid at all: see the two-panel rule below.
 _MASS_NORM_GRID = np.linspace(1.0, 200.0, 500)
 # Mirrors darksirens.gw.populations.utils.get_pairing_panel_quadrature() (kept
 # numpy-only for the same reason the taper filters above are: this generator
@@ -159,7 +160,15 @@ _MASS_NORM_GRID = np.linspace(1.0, 200.0, 500)
 # shoulder, 16 nodes each, in place of a 200-node uniform q trapezoid, and the
 # mock must use the SAME rule or the stored pdraw and the inference target
 # disagree by the difference of two quadratures (measured 5.4e-4 relative,
-# against the 1e-5 tests/test_mock_generator_taper.py allows).
+# against the 1e-5 tests/test_mock_generator_taper.py allows).  The mirror is
+# pinned STRUCTURALLY, not just numerically:
+# tests/test_mock_generator_taper.py::test_pairing_quadrature_mirrors_the_package
+# compares this constant and these nodes against
+# get_pairing_panel_quadrature() elementwise, because the component-density
+# comparison in the same file is dominated by the mass grid and does NOT see a
+# node-count drift (measured: its worst residual stays 4.9e-6 whether the
+# package uses 16, 24, 32 or 64 nodes per panel).  Anyone changing
+# PAIRING_PANEL_NQ must change this too.
 _PAIR_PANEL_NQ = 16
 _PAIR_GL_X, _PAIR_GL_W = np.polynomial.legendre.leggauss(_PAIR_PANEL_NQ)
 _PAIR_GL_T = 0.5 * (_PAIR_GL_X + 1.0)

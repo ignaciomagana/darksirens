@@ -17,9 +17,16 @@ What these tests pin
 1. The rule is what it says it is: an INDEPENDENT NumPy reimplementation of the
    two-panel split reproduces the shipped normaliser to floating point.
 2. The BOUND: worst |Delta log N| against a composite-Gauss-Legendre reference
-   over prior draws, and the strictly smaller H0-COHERENT component that is the
-   reason the change is admissible at all (a smaller worst case does NOT imply a
-   smaller tilt -- measured inversions exist -- so the tilt is asserted directly).
+   over prior draws, both NEAR THE SUPPORT EDGE (7.6e-3 nats) and over the FULL
+   prior box (4.6e-2, at m_min = 2, dm_min = 0, beta = -2, m1 = 250 -- the error
+   grows with m1/q_a), and the strictly smaller H0-COHERENT component that is
+   the reason the change is admissible at all (a smaller worst case does NOT
+   imply a smaller tilt -- measured inversions exist -- so the tilt is asserted
+   directly, at the amplitude-worst corners too).
+2b. The PANEL CONTRACT: GL-16 per panel is only right for a kernel that is
+   smooth on the scale of a panel.  A subclass whose kernel carries a narrower
+   feature declares its edges through ``PairingModel._panel_edges``;
+   ``GaussianPairing`` does, and is 2.7e+01 nats off without them.
 3. The GATE: the split must come from the pairing's OWN taper parameters.
    ``GWTC5FiducialBPL2PeaksPairing`` deletes the caller's ``(m_min, dm_min)`` and
    tapers on ``theta = (beta, m2_low, delta_m2)``, so it overrides
@@ -163,18 +170,32 @@ def test_reference_is_converged():
 # 2. The bound, in both currencies -- amplitude AND coherence.
 # ---------------------------------------------------------------------------
 
+
+def _trap200(m1, m_min, dm_min, theta):
+    """The 200-node uniform support-relative trapezoid the panel split replaced.
+
+    Carried here so every comparison against it is measured, not quoted."""
+    t = jnp.linspace(0.0, 1.0, 200)
+    q_cut = jnp.clip(m_min / jnp.asarray(m1), 0.0, 1.0)
+    width = 1.0 - q_cut
+    qn = q_cut[:, None] + t * width[:, None]
+    p = PL._eval_unnorm(jnp.asarray(m1)[:, None], qn, m_min, dm_min, theta)
+    return np.asarray(jnp.trapezoid(p, dx=1.0 / 199.0, axis=-1) * width)
+
+
 def test_worst_case_bound_and_improvement_over_the_trapezoid(capsys):
-    """Worst |Delta log N| near the support edge, 50 prior draws.
+    """Worst |Delta log N| NEAR THE SUPPORT EDGE, 50 prior draws.
+
+    This is the near-edge bound only: the m1 sweep spans the 24 grid cells above
+    m_min, i.e. m1/m_min in [1, 1.064], which is where the trapezoid's endpoint
+    deficit is worst and where the opt-in grid branch's interpolant gives up.
+    The rule's error GROWS with m1/q_a, so the bound over the whole prior box is
+    a different (larger) number -- see
+    :func:`test_worst_case_bound_over_the_full_prior_box`.
 
     The old 200-node uniform support-relative trapezoid is carried here
     explicitly so the comparison is measured, not quoted."""
-    def trap200(m1, m_min, dm_min, theta):
-        t = jnp.linspace(0.0, 1.0, 200)
-        q_cut = jnp.clip(m_min / jnp.asarray(m1), 0.0, 1.0)
-        width = 1.0 - q_cut
-        qn = q_cut[:, None] + t * width[:, None]
-        p = PL._eval_unnorm(jnp.asarray(m1)[:, None], qn, m_min, dm_min, theta)
-        return np.asarray(jnp.trapezoid(p, dx=1.0 / 199.0, axis=-1) * width)
+    trap200 = _trap200
 
     rng = np.random.default_rng(7)
     draws = [(float(rng.uniform(2.0, 10.0)), float(rng.uniform(0.0, 10.0)),
@@ -204,8 +225,59 @@ def test_worst_case_bound_and_improvement_over_the_trapezoid(capsys):
               f"m_min, 50 prior draws, vs a composite-GL reference:\n"
               f"    2-panel GL-16 (shipped): {worst_new:.3e}\n"
               f"    200-node trapezoid (pre-2026-09-05): {worst_old:.3e}")
-    assert worst_new < 1.5e-2, worst_new           # documented bound
+    assert worst_new < 1.5e-2, worst_new           # documented NEAR-EDGE bound
     assert worst_new < 0.5 * worst_old, (worst_new, worst_old)
+
+
+def test_worst_case_bound_over_the_full_prior_box(capsys):
+    """The bound over the WHOLE support, not just the cells above m_min.
+
+    The two-panel rule's residual grows with m1/q_a -- the kernel panel
+    ``[q_a, 1]`` gets longer and, at a steeply negative beta, more curved -- so
+    the near-edge bound above does not bound the prior box.  Swept over the
+    reachable powerlaw+peak corners (m_min in [2, 10], dm_min in [0, 10],
+    beta in [-2, 7]) plus 40 draws, m1 log-spaced over [m_min, 250]:
+
+        2-panel GL-16 (shipped)              4.6e-2 nats, at (2.0, 0.0, -2.0),
+                                             m1 = 250 -- the worst reachable
+                                             corner in every direction at once
+        200-node trapezoid (pre-2026-09-05)  2.9e-1 nats
+
+    i.e. 6x better, and better on EVERY draw (the loop fails if any draw
+    inverts).  The amplitude here is 60x the near-edge one and still 6x under
+    what it replaced; the statistic that decides admissibility is the coherent
+    part, which :func:`test_h0_coherent_component_is_far_below_the_tilt_budget`
+    pins at these same corners.
+    """
+    rng = np.random.default_rng(11)
+    draws = [(2.0, 0.01, -2.0), (2.0, 0.0, -2.0), (3.0, 0.0, -2.0),
+             (10.0, 0.05, -2.0), (2.0, 10.0, 0.0), (5.0, 3.0, 1.0),
+             (10.0, 10.0, 7.0), (3.5, 0.01, 7.0)]
+    draws += [(float(rng.uniform(2.0, 10.0)), float(rng.uniform(0.0, 10.0)),
+               float(rng.uniform(-2.0, 7.0))) for _ in range(40)]
+    worst_new = worst_old = 0.0
+    for m_min, dm_min, beta in draws:
+        theta = jnp.asarray([beta])
+        m1 = np.exp(np.linspace(np.log(m_min), np.log(250.0), 60))
+        m1 = np.clip(m1, m_min * (1.0 + 1e-9), None)
+        ref = reference_norm(PL, m1, m_min, dm_min, theta)
+        new_v = shipped_norm(PL, m1, m_min, dm_min, theta)
+        old_v = _trap200(m1, m_min, dm_min, theta)
+        ok = (ref > 0) & (new_v > 0) & (old_v > 0)
+        if not ok.any():
+            continue
+        e_new = float(np.max(np.abs(np.log(new_v[ok]) - np.log(ref[ok]))))
+        e_old = float(np.max(np.abs(np.log(old_v[ok]) - np.log(ref[ok]))))
+        assert e_new <= e_old, (m_min, dm_min, beta, e_new, e_old)
+        worst_new = max(worst_new, e_new)
+        worst_old = max(worst_old, e_old)
+    with capsys.disabled():
+        print(f"\n[pairing_panel] worst |Delta log N| over the FULL prior box "
+              f"(m1 in [m_min, 250], 48 corners/draws):\n"
+              f"    2-panel GL-16 (shipped): {worst_new:.3e}\n"
+              f"    200-node trapezoid (pre-2026-09-05): {worst_old:.3e}")
+    assert worst_new < 6.0e-2, worst_new           # documented FULL-BOX bound
+    assert worst_new < 0.25 * worst_old, (worst_new, worst_old)
 
 
 def test_h0_coherent_component_is_far_below_the_tilt_budget(capsys):
@@ -226,7 +298,12 @@ def test_h0_coherent_component_is_far_below_the_tilt_budget(capsys):
     svals = np.exp(np.linspace(np.log(0.75), np.log(1.35), 11))
 
     rows = []
-    for m_min, dm_min, beta in [(5.0, 3.0, 1.0), (5.0, 0.5, 1.0), (4.0, 5.0, -1.5)]:
+    # The last three are the corners where the AMPLITUDE bound is worst
+    # (steeply negative beta, lowest floor, narrowest taper): the amplitude and
+    # the tilt do not order rules the same way, so they are pinned here too.
+    for m_min, dm_min, beta in [(5.0, 3.0, 1.0), (5.0, 0.5, 1.0), (4.0, 5.0, -1.5),
+                                (2.0, 0.05, -2.0), (2.0, 0.01, -1.5),
+                                (10.0, 0.05, -2.0)]:
         theta = jnp.asarray([beta])
         means = []
         for s in svals:
@@ -242,6 +319,146 @@ def test_h0_coherent_component_is_far_below_the_tilt_budget(capsys):
             print(f"    m_min={m_min:5} dm={dm_min:6} beta={beta:5}: {tilt:.3e} nats")
     for m_min, dm_min, beta, tilt in rows:
         assert tilt < 5.0e-3, (m_min, dm_min, beta, tilt)
+
+
+# ---------------------------------------------------------------------------
+# 2b. THE PANEL CONTRACT: a kernel with a feature narrower than a panel must
+#     declare that feature's edges (PairingModel._panel_edges).
+# ---------------------------------------------------------------------------
+
+def test_panel_edges_default_is_the_two_panel_split():
+    """The default hook declares nothing, and the split is exactly two panels.
+
+    Both production pairings take this path -- their kernel above the shoulder
+    is a bare ``q**beta``, which GL-16 integrates to round-off -- so the default
+    must stay the cheap two-panel rule.
+    """
+    theta = jnp.asarray([1.0])
+    assert PL._panel_edges(jnp.asarray([30.0]), 5.0, 3.0, theta) == ()
+    assert G5._panel_edges(jnp.asarray([30.0]), 5.0, 3.0,
+                           jnp.asarray([1.0, 5.0, 3.0])) == ()
+    t, _ = U.get_pairing_panel_quadrature()
+    panels = PL._panel_nodes(jnp.asarray([30.0, 60.0]), 5.0, 3.0, theta, t)
+    assert len(panels) == 2
+    # ... and they tile the support (q_cut, 1] exactly, in order.
+    q_cut = 5.0 / 30.0
+    lo_a = float(panels[0][0][0, 0] - t[0] * panels[0][1][0])
+    np.testing.assert_allclose(lo_a, q_cut, rtol=0, atol=1e-15)
+    np.testing.assert_allclose(float(panels[0][1][0] + panels[1][1][0]),
+                               1.0 - q_cut, rtol=0, atol=1e-15)
+
+
+def _gaussian_pairing():
+    from darksirens.gw.populations.parametric import GaussianPairing
+    return GaussianPairing(ParamSpec(r"$\mu_q$", 0.0, 1.0),
+                           ParamSpec(r"$\sigma_q$", 0.0, 1.0))
+
+
+# (mu_q, sigma_q, m_min, dm_min, m1); sigma_q spans four decades of feature
+# width, from far narrower than a panel to comparable with the whole support.
+_GAUSS_CASES = [(0.9, 0.2, 5.0, 3.0, 60.0), (0.5, 0.02, 5.0, 3.0, 60.0),
+                (0.95, 0.01, 5.0, 3.0, 12.0), (0.5, 0.02, 5.0, 0.05, 60.0),
+                (0.3, 0.03, 5.0, 3.0, 20.0), (0.2, 0.01, 5.0, 8.0, 40.0),
+                (0.6, 0.001, 5.0, 3.0, 60.0), (0.5, 0.5, 5.0, 3.0, 60.0),
+                (0.15, 0.05, 5.0, 3.0, 60.0)]
+
+
+def _quad_norm(pair, m1, m_min, dm_min, theta, breaks):
+    """Gauss-Kronrod reference for N(m1) -- a different algorithm from the
+    composite-GL rule used elsewhere in this file, broken at every panel edge."""
+    quad = pytest.importorskip("scipy.integrate").quad
+
+    def f(x):
+        return float(np.asarray(pair._eval_unnorm(jnp.asarray(m1), jnp.asarray(x),
+                                                  m_min, dm_min, theta)))
+    pts = sorted({float(np.clip(b, breaks[0], 1.0)) for b in breaks} | {1.0})
+    total = 0.0
+    for lo, hi in zip(pts[:-1], pts[1:]):
+        if hi > lo:
+            total += quad(f, lo, hi, epsabs=1e-18, epsrel=1e-13, limit=400)[0]
+    return total
+
+
+def test_gaussian_pairing_resolves_a_feature_narrower_than_a_panel(capsys):
+    """The panel contract, measured on the one shipped kernel that needs it.
+
+    ``GaussianPairing`` puts a Gaussian of width ``sigma_q`` inside the panel
+    above the shoulder.  GL-16 cannot see a feature it straddles no nodes of, so
+    the class declares ``mu_q -/+ 5 sigma_q`` through ``_panel_edges``.  Against
+    a Gauss-Kronrod reference over nine corners with sigma_q from 0.001 to 0.5,
+    worst |Delta log N|: 2.7e+01 nats without the declared edges, 6.7e-7 with
+    them.  The class is not grammar-registered today, but it is public API and
+    it is what a registered Gaussian pairing would inherit.
+    """
+    GP = _gaussian_pairing()
+    worst = 0.0
+    for mu, sig, m_min, dm_min, m1 in _GAUSS_CASES:
+        theta = jnp.asarray([mu, sig])
+        got = shipped_norm(GP, m1, m_min, dm_min, theta)[0]
+        q_cut = float(np.clip(m_min / m1, 0.0, 1.0))
+        want = _quad_norm(GP, m1, m_min, dm_min, theta,
+                          [q_cut, float(np.clip((m_min + dm_min) / m1, q_cut, 1.0)),
+                           float(np.clip(mu - 8 * sig, q_cut, 1.0)),
+                           float(np.clip(mu + 8 * sig, q_cut, 1.0))])
+        worst = max(worst, abs(float(np.log(got / want))))
+    with capsys.disabled():
+        print(f"\n[pairing_panel] GaussianPairing, worst |Delta log N| over "
+              f"9 corners (sigma_q 0.001 .. 0.5): {worst:.3e}")
+    assert worst < 5.0e-6, worst
+
+
+def test_the_default_hook_would_fail_that_contract(monkeypatch):
+    """The declared edges are load-bearing: without them the same corners are
+    off by tens of nats, which is why the contract is a contract."""
+    from darksirens.gw.populations.parametric import GaussianPairing
+    GP = _gaussian_pairing()
+    monkeypatch.setattr(GaussianPairing, "_panel_edges", PairingModel._panel_edges)
+    worst = 0.0
+    for mu, sig, m_min, dm_min, m1 in _GAUSS_CASES:
+        theta = jnp.asarray([mu, sig])
+        got = shipped_norm(GP, m1, m_min, dm_min, theta)[0]
+        q_cut = float(np.clip(m_min / m1, 0.0, 1.0))
+        want = _quad_norm(GP, m1, m_min, dm_min, theta,
+                          [q_cut, float(np.clip((m_min + dm_min) / m1, q_cut, 1.0)),
+                           float(np.clip(mu - 8 * sig, q_cut, 1.0)),
+                           float(np.clip(mu + 8 * sig, q_cut, 1.0))])
+        worst = max(worst, abs(float(np.log(got / want))))
+    assert worst > 1.0, worst
+
+
+def test_declared_edges_are_clipped_and_sorted():
+    """A declared edge outside the support costs a zero-width panel, never a
+    wrong answer: mu_q below the shoulder or above 1 must still normalise."""
+    GP = _gaussian_pairing()
+    for mu, sig in ((0.02, 0.01), (1.4, 0.05), (0.5, 0.9)):
+        theta = jnp.asarray([mu, sig])
+        for m_min, dm_min, m1 in ((5.0, 3.0, 60.0), (5.0, 3.0, 6.0)):
+            got = shipped_norm(GP, m1, m_min, dm_min, theta)[0]
+            ref = reference_norm(GP, m1, m_min, dm_min, theta, 2048, 2048)[0]
+            assert np.isfinite(got) and got >= 0.0, (mu, sig, m1)
+            # Only where the normaliser is not itself an underflow sliver: at
+            # mu_q = 0.02 with q_cut = 0.083 the whole support sits >6 sigma out
+            # and N ~ 3e-16, where the composite reference's own summation is
+            # the larger error.  Nothing there survives a logsumexp.
+            if ref > 1e-12:
+                np.testing.assert_allclose(got, ref, rtol=2e-5)
+
+
+def test_zero_primary_mass_is_zero_with_finite_gradients():
+    """m1 = 0 makes m_edge/m1 an inf whose clip VJP is 0 * inf = NaN.  The
+    density there is exactly 0.0 either way (m2 = 0 < m_min kills every node),
+    but the double-where in ``_panel_nodes`` keeps the gradient finite for a
+    padded store.  Before it, d/d(m_min) AND d/d(dm_min) were both NaN."""
+    m1 = jnp.asarray([0.0, 30.0])
+    q = jnp.asarray([0.5, 0.5])
+    val = np.asarray(PL(m1, q, 5.0, 3.0, jnp.asarray([1.0])))
+    assert val[0] == 0.0 and val[1] > 0.0
+
+    def f(p):
+        return jnp.sum(PL(m1, q, p[0], p[1], jnp.asarray([p[2]])))
+
+    g = np.asarray(jax.grad(f)(jnp.asarray([5.0, 3.0, 1.0])))
+    assert np.all(np.isfinite(g)), g
 
 
 # ---------------------------------------------------------------------------

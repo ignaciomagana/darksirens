@@ -23,8 +23,13 @@ exact branch uses (``PairingModel._panel_norm``), only at ``pairing_edge_nq``
 nodes per panel against the exact branch's ``PAIRING_PANEL_NQ = 16``.  That is
 what makes the headline assertion below -- the grid branch is never worse than
 the branch it approximates -- hold BY CONSTRUCTION (a strictly finer rule on an
-identical split) rather than by calibration.  Keep ``pairing_edge_nq`` above
-``PAIRING_PANEL_NQ``; tests/test_pairing_panel_quadrature.py pins that.
+identical split) FOR THE SAMPLES THAT TAKE THAT RULE.  The trusted samples in
+the same sweep take ``jnp.interp`` of log I instead, which no node count
+constrains, so for them the assertion is calibration after all: the measured
+margin runs from 1.45x (m_min = 2, dm_min = 10, beta = 0 at N_grid = 2048) to
+199x.  ``pairing_edge_nq`` may not drop below ``PAIRING_PANEL_NQ``;
+``NormalizationGridSettings.__post_init__`` rejects that and
+tests/test_pairing_panel_quadrature.py pins the default.
 
 Run with ``JAX_PLATFORMS=cpu``.
 """
@@ -213,7 +218,7 @@ def test_edge_cell_gradients_track_the_exact_branch():
 
 def test_edge_quadrature_settings_validate_and_reconfigure():
     s = U.normalization_grid_settings()
-    assert s.pairing_edge_nq >= 2 and s.pairing_edge_tol > 0.0
+    assert s.pairing_edge_nq >= U.PAIRING_PANEL_NQ and s.pairing_edge_tol > 0.0
     t, w = U._gauss_legendre_01(s.pairing_edge_nq)
     assert t.shape == w.shape == (s.pairing_edge_nq,)
     # open interval, unit total weight, symmetric
@@ -221,12 +226,17 @@ def test_edge_quadrature_settings_validate_and_reconfigure():
     np.testing.assert_allclose(float(w.sum()), 1.0, rtol=0, atol=1e-14)
     with pytest.raises(ValueError):
         _dc_replace(U._NORMALIZATION_GRID_SETTINGS, pairing_edge_nq=1)
+    # A rule COARSER than the exact branch's own panel rule would invert the
+    # invariant this file asserts, so the floor is PAIRING_PANEL_NQ, not 2.
+    with pytest.raises(ValueError, match="PAIRING_PANEL_NQ"):
+        _dc_replace(U._NORMALIZATION_GRID_SETTINGS,
+                    pairing_edge_nq=U.PAIRING_PANEL_NQ - 1)
     with pytest.raises(ValueError):
         _dc_replace(U._NORMALIZATION_GRID_SETTINGS, pairing_edge_tol=0.0)
-    got = U.configure_normalization_grids(pairing_edge_nq=12,
+    got = U.configure_normalization_grids(pairing_edge_nq=32,
                                           pairing_edge_tol=1e-3)
-    assert got.pairing_edge_nq == 12 and got.pairing_edge_tol == 1e-3
-    assert U.get_pairing_edge_quadrature()[0].shape == (12,)
+    assert got.pairing_edge_nq == 32 and got.pairing_edge_tol == 1e-3
+    assert U.get_pairing_edge_quadrature()[0].shape == (32,)
 
 
 def test_edge_quadrature_cold_cache_does_not_leak_tracers():

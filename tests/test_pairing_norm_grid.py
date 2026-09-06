@@ -848,15 +848,21 @@ def test_support_edge_dense_sweep_bounded_and_one_sided(capsys):
         for mmin, dmmin, beta, ng, over, mism in rows:
             print(f"    mmin={mmin:5} dm={dmmin:6} beta={beta:5} N={ng:5}: "
                   f"over={over:+.3e}  zero-pattern-mismatches={mism}")
-    # Post-fix the residual is GRID-SIZE INDEPENDENT and is the EXACT branch's
-    # own quadrature error, not the grid path's: near the support edge the exact
-    # branch's 200-node uniform q-trapezoid does not resolve the taper boundary
-    # layer and is itself up to 3.1e-2 off a converged 200001-node reference,
-    # which the per-sample Gauss-Legendre rule tracks to <= 5e-3
-    # (tests/test_pairing_edge_fix.py).  Pre-fix this column read up to +3.5.
+    # Post-fix the residual is GRID-SIZE INDEPENDENT and is the difference of
+    # two rules on the SAME two-panel split -- the grid branch's near-edge rule
+    # at ``pairing_edge_nq`` nodes per panel against the exact branch's
+    # ``PAIRING_PANEL_NQ`` -- so it is bounded by the exact branch's own
+    # near-edge quadrature error, 7.6e-3 nats off a composite-GL reference
+    # (tests/test_pairing_panel_quadrature.py), and not by the interpolant.
+    # Measured worst over all 18 rows here: +4.2e-3, at mmin = 6, dm = 5.005,
+    # beta = 2.5, N = 2048 (the widest taper of the set, where the interpolated
+    # and per-sample rules disagree most).  The bound below is re-derived
+    # against that with ~2x headroom, not against the 200-node trapezoid the
+    # panel split replaced (this assertion read 3.5e-2 while that trapezoid was
+    # the exact branch).  Pre-fix this column read up to +3.5.
     for mmin, dmmin, beta, ng, over, mism in rows:
         assert mism == 0, (mmin, dmmin, beta, ng, mism)
-        assert over < 3.5e-2, (mmin, dmmin, beta, ng, over)
+        assert over < 1.0e-2, (mmin, dmmin, beta, ng, over)
 
 
 def test_support_edge_sample_does_not_corrupt_logmu_or_neff(capsys):
