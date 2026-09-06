@@ -68,6 +68,7 @@ for checks, diagnostics, and tests; they build the state internally on
 every call.
 """
 
+import jax
 import jax.numpy as jnp
 from jax import lax, vmap
 
@@ -728,6 +729,54 @@ def _grid_bracket(z):
     return idx, jnp.clip(t, 0.0, 1.0)
 
 
+@jax.tree_util.register_pytree_node_class
+class WidthTier:
+    """One static row-WIDTH tier of a routed sample set: a cap and its samples.
+
+    ``cap`` is the number of catalog columns the tier's samples read --
+    ``zgals[pix, :cap]``, ``inv_sig_eff[pix, :cap]``, ``log_kw_eff[pix, :cap]``
+    -- and ``idx`` the int32 positions of those samples in the caller's sample
+    vector.  The catalog is padded to the GLOBAL densest row (1719 slots on the
+    production DESI nside-64 view) while the sample-weighted mean real row holds
+    436 (PE) / 457 (selection) galaxies, so a flat evaluation reads ~2.7x more
+    slots than any sample's pixel actually contains.  Tiering the samples by
+    ``ngals[pix]`` recovers that: MEASURED sample-weighted mean gathered slots
+    at caps (0, 1024, n_max) is 628.4 (PE) / 657.5 (selection).
+
+    ``cap`` is pytree AUX DATA, not a leaf.  It is a static column width -- it
+    has to survive into the traced graph as a Python int, and it belongs in the
+    jit cache key, because two ladders are two different graphs.
+
+    Why a column slice and not a compacted per-tier VIEW.  Narrowing the
+    gather leaves every row-indexed array exactly where it is, so nothing else
+    in the build has to move.  Relabelling the catalog rows instead (one
+    compacted ``(n_rows_t, cap_t)`` table per tier) would additionally shrink
+    the resident tables, but it requires every row-indexed leaf -- ``ngals``,
+    ``unique_pixels``, ``pixel_to_cache_idx``, ``dN_obs_kde``, the LSS and mark
+    rows, every prior-state row, and the pinned quadrature's ``probe_rows`` --
+    to move coherently, and a single missed leaf is not a ulp error: it is a
+    per-sample decorrelation, which this campaign has MEASURED as a monotone
+    H0-correlated tilt of 4e-2 to 5e-1 nats.  The column slice cannot produce
+    that failure mode because it never renames a row.
+    """
+
+    __slots__ = ("cap", "idx")
+
+    def __init__(self, cap, idx):
+        self.cap = int(cap)
+        self.idx = idx
+
+    def tree_flatten(self):
+        return (self.idx,), self.cap
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        return cls(aux, children[0])
+
+    def __repr__(self):
+        return f"WidthTier(cap={self.cap}, n={getattr(self.idx, 'shape', ('?',))[0]})"
+
+
 class EmptyRowRouting(NamedTuple):
     """Build-time partition of one sample set by "is my catalog row empty?".
 
@@ -744,29 +793,44 @@ class EmptyRowRouting(NamedTuple):
     partition is decided once, here, at build time:
 
     ``idx_occ``   (n_occ,)   int32 -- samples whose row holds >= 1 galaxy,
-                                      in their original relative order
+                                      in their original relative order; ``None``
+                                      when ``tiers`` carries them instead
     ``idx_empty`` (n_emp,)   int32 -- samples whose row is empty, ditto
-    ``inv_order`` (n_occ+n_emp,) int32 -- inverse of
-                                      ``concatenate([idx_occ, idx_empty])``
+    ``inv_order`` (n_occ+n_emp,) int32 -- inverse of the concatenation the
+                                      evaluator builds (``[idx_occ, idx_empty]``,
+                                      or ``[*tier idx, idx_empty]``)
     ``empty_rows`` (N_rows,) bool  -- the rows the partition called empty
                                       (``ngals == 0``), carried so the graph can
                                       VERIFY the routing predicate against the
                                       kernels it actually built.
 
-    The evaluator gathers ``(z, pix)`` into the two groups, runs the unchanged
-    KDE on the occupied group, evaluates the KDE-free expression on the empty
-    group, and gathers the concatenation back through ``inv_order`` -- so the
-    vector it RETURNS is in the caller's original sample order and every
-    downstream reduction (the per-event ``(nEvents, nsamp)`` reshape, the
-    selection ``logsumexp``) sees the same values in the same slots.  Nothing
-    outside this module has to know the partition exists, and no other
-    per-sample array has to move.
+    The evaluator gathers ``(z, pix)`` into the groups, runs the unchanged KDE
+    on the occupied ones, evaluates the KDE-free expression on the empty one,
+    and gathers the concatenation back through ``inv_order`` -- so the vector it
+    RETURNS is in the caller's original sample order and every downstream
+    reduction (the per-event ``(nEvents, nsamp)`` reshape, the selection
+    ``logsumexp``) sees the same values in the same slots.  Nothing outside this
+    module has to know the partition exists, and no other per-sample array has
+    to move.
+
+    ``tiers`` is the second cut, by row WIDTH rather than by emptiness (see
+    :class:`WidthTier`).  It changes the accuracy class of the occupied group
+    from bit-identical to ulp-level -- same galaxies, same arithmetic, a shorter
+    reduction, so XLA may pair the real terms differently.
     """
 
     idx_occ: Any
     idx_empty: Any
     inv_order: Any
     empty_rows: Any
+    #: Static row-WIDTH tiers of the OCCUPIED samples (see :class:`WidthTier`),
+    #: in cap order, or ``()`` for the untiered plan.  When present ``idx_occ``
+    #: is ``None`` and ``inv_order`` inverts
+    #: ``concatenate([*(t.idx for t in tiers), idx_empty])`` instead of
+    #: ``concatenate([idx_occ, idx_empty])`` -- the tiers ARE the occupied
+    #: group, cut by ``ngals[pix]``, so nothing is evaluated twice and nothing
+    #: is left out.
+    tiers: Any = ()
 
 
 def _routing_applies(routing, z) -> bool:
@@ -835,8 +899,11 @@ def _empty_row_routing_ok(state, routing):
 def _eval_dark_scalar(
     z, pix, state: DarkSirenPriorState, em_catalog: EMCatalog,
     catalog_sky_weighting: str = "conditional",
+    col_cap: int | None = None,
 ):
-    log_p_cat = eval_log_catalog_prior_state(z, pix, state.kernels, em_catalog)
+    log_p_cat = eval_log_catalog_prior_state(
+        z, pix, state.kernels, em_catalog, col_cap=col_cap
+    )
     # NaN (out-of-grid z, degenerate kernels) must mean "impossible", never p=1.
     log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
 
@@ -909,24 +976,60 @@ def _eval_dark_routed(
     kind of decorrelated per-sample array that tilts with H0 at production
     scale).  It costs one ``(n_emp,)`` int32 gather and a bool reduce -- 442k
     elements against a 1e6-sample KDE on production, unmeasurable.
+
+    ``routing.tiers`` cuts the OCCUPIED group further, by row WIDTH: each
+    :class:`WidthTier` runs the same evaluator on its own samples, reading only
+    the column prefix ``[0, cap)`` of every catalog row.  That is exact only
+    while every LIVE slot of every row a tier's samples land on sits below that
+    tier's cap, and the promise has two halves.  The build asserts the half that
+    is a property of the ARRAYS -- live slots occupy the row prefix
+    ``[0, ngals)``
+    (:func:`darksirens.likelihood.factory._assert_live_slots_are_row_prefix`).
+    The graph asserts the half that is a property of the PLAN, here and per
+    tier: ``all(ngals[pix[tier.idx]] <= tier.cap)``, an ``(n_t,)`` int gather
+    and a reduce, unmeasurable against a 1e6-sample KDE.  That term is what
+    binds each tier to THIS ``pix`` vector -- the plan is selected by sample
+    COUNT alone, and a plan applied to a different same-length vector, or one
+    built from a stale ``ngals``, would otherwise TRUNCATE real galaxies and
+    return a finite, plausible, wrong number instead of failing.  It is spent
+    the same way as the routing verdict: ``-inf`` on the whole vector, so the
+    total log-likelihood is ``-inf`` at every coordinate and the run cannot
+    start.
     """
-    io, ie = routing.idx_occ, routing.idx_empty
+    ie = routing.idx_empty
     pix_emp = pix[ie]
-    v_occ = vmap(
-        lambda z_i, p_i: _eval_dark_scalar(
-            z_i, p_i, state, em_catalog, catalog_sky_weighting
-        )
-    )(z[io], pix[io])
+    tiers = tuple(routing.tiers or ())
+    caps_ok = jnp.asarray(True)
+    if tiers:
+        ngals = em_catalog.ngals
+        parts = []
+        for tier in tiers:
+            it = tier.idx
+            pix_t = pix[it]
+            parts.append(vmap(
+                lambda z_i, p_i, _cap=tier.cap: _eval_dark_scalar(
+                    z_i, p_i, state, em_catalog, catalog_sky_weighting,
+                    col_cap=_cap,
+                )
+            )(z[it], pix_t))
+            caps_ok = caps_ok & jnp.all(ngals[pix_t] <= tier.cap)
+    else:
+        io = routing.idx_occ
+        parts = [vmap(
+            lambda z_i, p_i: _eval_dark_scalar(
+                z_i, p_i, state, em_catalog, catalog_sky_weighting
+            )
+        )(z[io], pix[io])]
     v_emp = vmap(
         lambda z_i, p_i: _eval_dark_scalar_empty_row(
             z_i, p_i, state, catalog_sky_weighting
         )
     )(z[ie], pix_emp)
-    out = jnp.concatenate([v_occ, v_emp])[routing.inv_order]
+    out = jnp.concatenate([*parts, v_emp])[routing.inv_order]
     routed_rows_are_empty = jnp.all(routing.empty_rows[pix_emp])
     # ``where`` and not an additive shift: an exactly-representable no-op on the
     # clean branch, so the routed samples carry no arithmetic of their own.
-    return jnp.where(ok & routed_rows_are_empty, out, -jnp.inf)
+    return jnp.where(ok & routed_rows_are_empty & caps_ok, out, -jnp.inf)
 
 
 # ------------------------------------------------------------
@@ -1136,12 +1239,17 @@ def eval_redshift_prior_with_state(
     build-time partition of THIS sample set into "my catalog row holds galaxies"
     and "my catalog row is empty"; the second group skips the KDE and takes the
     KDE-free expression instead.  The returned vector is in the caller's sample
-    order either way, and it agrees with the plain path SAMPLE BY SAMPLE to the
-    bit, so passing it is a speed decision only.  (The total log-likelihood
-    built out of it can still move at the last bit, because splitting one vmap
-    into two changes how XLA fuses and orders the reductions ABOVE this
-    function: measured at <= 4e-14 relative on the CPU backend and at exactly
-    0.0 on the production H100 build -- see ``docs/source/guide/performance.md``.)
+    order either way, so passing it is a speed decision only.  Without
+    ``tiers`` the occupied group agrees with the plain path SAMPLE BY SAMPLE to
+    the bit.  (The total log-likelihood built out of it can still move at the
+    last bit, because splitting one vmap into two changes how XLA fuses and
+    orders the reductions ABOVE this function: measured at <= 4e-14 relative on
+    the CPU backend and at exactly 0.0 on the production H100 build -- see
+    ``docs/source/guide/performance.md``.)  WITH ``tiers`` the occupied group is
+    ulp-level instead: each tier evaluates the same galaxies over a shorter
+    row, so only the reduction's association changes (MEASURED on the
+    production catalog: max ``|dlog p_cat| = 5.68e-14`` nats, H0 slope
+    6.6e-15 nats per km/s/Mpc over the whole [20, 140] prior).
     ``None`` (the default), a slice of the planned set, or kernels that carry no
     ``row_empty`` all fall back to the plain vmap.
     """
