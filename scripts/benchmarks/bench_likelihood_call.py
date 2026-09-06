@@ -39,6 +39,14 @@ Notes
   on a dense catalog) and ``--row_chunk 256`` for the build-time quadrature.
 * The value comparison is only meaningful for the SAME data and the SAME
   ``--seed``-derived coordinates; the script checks the coordinates match.
+* The summary JSON also records ``compiles_total`` (real XLA compilations),
+  ``compile_requests_total`` and ``compile_requests_in_timed_loop`` (executables
+  JAX asked for, compiled OR served from the persistent cache) and
+  ``xla_cache_dir``, so a startup timing states which cache state produced it —
+  never compare startup phases across arms with different ``xla_cache_dir``.
+  ``--recompile-guard`` exits nonzero when anything is lowered inside the timed
+  loop, which is the per-call shape/static-argument leak this harness is blind
+  to otherwise.
 """
 from __future__ import annotations
 
@@ -56,8 +64,62 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import jax  # noqa: E402
 jax.config.update("jax_enable_x64", True)
+
+# Recompile guard.  A candidate that leaks a Python-side shape or static
+# argument into the sampler's inner loop re-lowers and re-compiles per call;
+# today that shows up only as a fat, noisy median, which is indistinguishable
+# from a slow kernel.  TWO counters, because they answer different questions:
+#
+# * ``compile_or_get_cached`` runs once per executable JAX asks for, whether it
+#   ends in a real compilation or in a persistent-cache HIT.  This is the "the
+#   likelihood re-lowered a module" event, and it is what ``--recompile-guard``
+#   trips on: counting real compilations alone would go quiet the moment
+#   ``DARKSIRENS_XLA_CACHE`` is exported and the leaked modules are served from
+#   disk — a per-call leak would still pay lowering + cache read + deserialize
+#   and the guard would report it clean.
+# * ``backend_compile`` runs only on a cache MISS, so the difference between the
+#   two counters is the number of entries served from the persistent cache.
+#
+# Both are module globals of ``jax._src.compiler`` and are looked up per call by
+# ``jax._src.interpreters.pxla``, so patching the module attributes is enough.
+import jax._src.compiler as _jax_compiler  # noqa: E402
+
+_COMPILES = [0]
+_COMPILE_REQUESTS = [0]
+_backend_compile_orig = _jax_compiler.backend_compile
+_compile_or_get_cached_orig = _jax_compiler.compile_or_get_cached
+
+
+def _counting_backend_compile(*args, **kwargs):
+    _COMPILES[0] += 1
+    return _backend_compile_orig(*args, **kwargs)
+
+
+def _counting_compile_or_get_cached(*args, **kwargs):
+    _COMPILE_REQUESTS[0] += 1
+    return _compile_or_get_cached_orig(*args, **kwargs)
+
+
+_jax_compiler.backend_compile = _counting_backend_compile
+_jax_compiler.compile_or_get_cached = _counting_compile_or_get_cached
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+
+
+def recompile_guard_failure(summary):
+    """The ``--recompile-guard`` predicate: a message, or None when clean.
+
+    Trips on compile REQUESTS, not on compilations, so a warm persistent cache
+    cannot hide a per-call lowering leak (see the counters above).
+    """
+    n = summary.get("compile_requests_in_timed_loop", 0)
+    if not n:
+        return None
+    served = n - summary.get("compiles_in_timed_loop", 0)
+    return (
+        f"recompile guard: {n} XLA compile request(s) inside the timed loop "
+        f"({summary.get('compiles_in_timed_loop', 0)} compiled, {served} served "
+        f"from the persistent cache) -- the likelihood is re-lowering per call")
 
 
 class _Built:
@@ -264,6 +326,10 @@ def main():
     ap.add_argument("--compare", default=None, help="a previous --out json to compare values/speed against")
     ap.add_argument("--components", action="store_true", help="also time the components in isolation")
     ap.add_argument("--verbose", action="store_true", help="show the CLI's own build output")
+    ap.add_argument("--recompile-guard", action="store_true",
+                    help="exit nonzero if ANY XLA compile request happens inside the timed "
+                         "loop (a per-call shape/static-argument leak), whether it compiles "
+                         "or is served from a warm persistent cache")
     ap.add_argument("rest", nargs=argparse.REMAINDER, help="-- <darksirens_inference args>")
     a = ap.parse_args()
     cli_args = [x for x in a.rest if x != "--"]
@@ -278,6 +344,8 @@ def main():
     for c in coords[:3]:
         jax.block_until_ready(likelihood(jnp.asarray(c)))
 
+    compiles_before_loop = _COMPILES[0]
+    requests_before_loop = _COMPILE_REQUESTS[0]
     times, values = [], {}
     for i in range(a.n_calls):
         k = i % len(coords)
@@ -301,6 +369,11 @@ def main():
         "t_load_s": b.t_load, "t_build_s": b.t_build, "t_first_call_s": t_first,
         "t_call_median_s": float(np.median(times)), "t_call_min_s": float(np.min(times)),
         "t_call_mean_s": float(np.mean(times)), "t_call_std_s": float(np.std(times)),
+        "compiles_total": _COMPILES[0],
+        "compiles_in_timed_loop": _COMPILES[0] - compiles_before_loop,
+        "compile_requests_total": _COMPILE_REQUESTS[0],
+        "compile_requests_in_timed_loop": _COMPILE_REQUESTS[0] - requests_before_loop,
+        "xla_cache_dir": jax.config.jax_compilation_cache_dir,
         "values": [values[k] for k in sorted(values)],
         "coords": coords.tolist(),
     }
@@ -313,6 +386,12 @@ def main():
     print(f"  load {b.t_load:.1f}s  build {b.t_build:.1f}s  first call (compile+run) {t_first:.1f}s")
     print(f"  call: median {np.median(times) * 1e3:.1f} ms  min {np.min(times) * 1e3:.1f} ms  "
           f"mean {np.mean(times) * 1e3:.1f} +- {np.std(times) * 1e3:.1f} ms  (n={a.n_calls})")
+    print(f"  compiles: {summary['compiles_total']} total "
+          f"({summary['compile_requests_total']} compile requests, "
+          f"{summary['compile_requests_total'] - summary['compiles_total']} served "
+          f"from the persistent cache), "
+          f"{summary['compile_requests_in_timed_loop']} request(s) inside the timed "
+          f"loop  xla_cache_dir={summary['xla_cache_dir']}")
     print(f"  values: {summary['values']}")
     if a.compare:
         base = json.load(open(a.compare))
@@ -332,9 +411,22 @@ def main():
         print("  components (isolated jits on the built operands):")
         run_components(b, jnp.asarray(coords[0]), max(3, a.n_calls // 4))
     print("=" * 78)
-    if a.out:
-        with open(a.out, "w") as f:
+    emit_and_guard(summary, a.out, a.recompile_guard)
+
+
+def emit_and_guard(summary, out_path, recompile_guard):
+    """Write the summary JSON, THEN trip the recompile guard if it fires.
+
+    Order matters: the JSON of a run that trips the guard is the evidence for
+    what tripped it, so it must survive the ``SystemExit``.
+    """
+    if out_path:
+        with open(out_path, "w") as f:
             json.dump(summary, f, indent=1)
+    if recompile_guard:
+        failure = recompile_guard_failure(summary)
+        if failure:
+            raise SystemExit(failure)
 
 
 if __name__ == "__main__":
