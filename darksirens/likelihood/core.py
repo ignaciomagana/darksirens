@@ -715,9 +715,12 @@ def darksiren_log_likelihood(
     # ``redshift.prior.EmptyRowRouting``).  A TRACED pytree operand -- its
     # STRUCTURE (which entries are None) is part of the jit cache key and its
     # index arrays ride in as arguments.  ``()`` (default) is the pre-existing
-    # per-sample evaluation, op for op; a supplied plan is bit-identical to it
-    # and only skips the catalog KDE on samples whose pixel row holds no
-    # galaxies.
+    # per-sample evaluation, op for op; a supplied plan only skips the catalog
+    # KDE on samples whose pixel row holds no galaxies, and returns the prior
+    # vector bit-identical to it, sample by sample and slot by slot.  (The TOTAL
+    # can still move at the last bit -- two vmaps in place of one change how XLA
+    # fuses the reductions above the evaluator; ulp-level, see
+    # ``redshift.prior._eval_dark_routed``.)
     empty_row_routing: tuple = (),
     # Comoving-distance interpolation table (``utils.cosmology.rs``), threaded as
     # a jit ARGUMENT and bound as the active table for this trace.  None resolves
