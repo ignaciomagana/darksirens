@@ -382,20 +382,54 @@ Amdahl ceiling is 2.08x. Measured on this box, warm cache, median of three
 reads of the four datasets: sequential 4.68 s, 2 workers 3.60 s, 4 workers
 1.93 s, 6 workers 2.63 s, 8 workers 4.27 s, 16 workers 3.48 s. Past ~4 workers
 GIL convoying eats the win, so raising the worker count is a regression, not a
-bigger gain; the pool is `min(4, os.cpu_count())`.
+bigger gain.
+
+**The floor is not "degrades to sequential" -- below two usable CPUs the
+threaded read is slower than the h5py read it replaces**, because the
+un-shuffle and the assemble copy are then pure added Python with no inflate to
+overlap against: one worker measures 6.41 s against 4.53 s sequential, a 1.4x
+regression. So the pool is sized by `len(os.sched_getaffinity(0))`, not by
+`os.cpu_count()` -- the two differ on any cpuset-restricted allocation (a
+`--cpus-per-task=1` batch job still reports 64 host cores) -- and the whole
+raw-chunk path is refused below two usable CPUs. Two is already a win
+(`taskset -c 20,21`: 3.34 s against 4.42 s). A cgroup CPU *quota* is a
+fractional limit rather than a mask and no affinity call can see it, so
+`DARKSIRENS_CATALOG_CHUNKED_READ=0` forces the plain h5py read everywhere; the
+arrays are the same bytes either way.
+
+Host memory is bounded. The calling thread reads raw chunks about ten times
+faster than the pool inflates them, so an unbounded submit loop would hold the
+whole *compressed* dataset in the executor queue. The loop caps the in-flight
+chunks at four per worker, which costs nothing measurable (2.01 s bounded
+against 2.10 s unbounded, medians of three) and holds peak host RSS at the
+sequential read's: 0.76-0.77 GB bounded, 0.78 GB sequential, 0.90-0.91 GB
+unbounded.
 
 The arrays are the same bytes, so nothing numeric changes. This is not a
 tolerance claim: the result of `read_dataset_chunked` is byte-for-byte the
 result of `np.asarray(dset)`, verified with `tobytes()` equality on all four
 production datasets and on synthetic files exercising every edge (partial edge
-chunks on both axes, 4- and 8-byte dtypes, 1-D datasets, 1/2/4/8 workers).
-`read_dataset_chunked` reimplements exactly one filter pipeline, so it refuses
-everything else and reads it with plain h5py instead: contiguous datasets, any
-compressor other than gzip, gzip without shuffle, a fletcher32 checksum or a
-scale-offset filter, virtual datasets, non-numeric dtypes, datasets under
-64 MB, and -- per chunk, at read time -- any chunk whose `filter_mask` is
-non-zero (HDF5 stored it with part of the pipeline skipped) or that is not
-allocated at all, in which case the whole dataset falls back.
+chunks on both axes, 4- and 8-byte dtypes, 1-D datasets, 2/4/8 workers).
+
+`read_dataset_chunked` reimplements exactly one filter pipeline -- shuffle,
+then deflate -- so it refuses everything else and reads it with plain h5py
+instead. The refusal tests the dataset creation property list for pipeline
+*equality*, not for the presence of individual filters: `dataset.compression`,
+`.shuffle`, `.fletcher32` and `.scaleoffset` each answer "is this filter in the
+pipeline" and cannot see a third filter or the order, so a legal
+`(shuffle, nbit, deflate)` dataset passes every one of them, raises no error,
+and decodes to different bytes on every element, while `(deflate, shuffle)` is
+indistinguishable from the pipeline handled here. Pipeline equality refuses
+both deliberately, and with them fletcher32, scale-offset, lzf and any
+third-party filter id. Also refused: contiguous datasets (a virtual dataset is
+one of these), non-numeric dtypes, datasets under 64 MB, and partially
+allocated datasets -- a chunk that was never written has no stored bytes, and
+h5py's exception for one is not even of a stable type, so the chunk count is
+checked up front instead. Finally, at read time, any chunk whose `filter_mask`
+is non-zero (HDF5 stored it with part of the pipeline skipped) sends the whole
+dataset to h5py, with a `RuntimeWarning` naming the dataset -- a fallback taken
+after the gate admitted the file is worth reporting rather than silently losing
+the 2.2x.
 
 Measured on an H100 NVL with `scripts/benchmarks/bench_likelihood_call.py
 --n-calls 20`, 259-event DESI nside-64 production configuration (H0 +
