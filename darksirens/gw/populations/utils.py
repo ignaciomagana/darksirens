@@ -94,13 +94,16 @@ def _min_pairing_m1_grid(m_lo: float, pairing_m_hi: float, n_q: int) -> int:
 # kernel is a bare ``q**beta`` and ``PairingModel._plateau_integral`` returns its
 # exact integral -- so those two models spend this many nodes per sample, not
 # twice it.  Deliberately a module constant and NOT a setting: the rule is
-# calibrated as a whole (16 nodes on the taper panel, plus either 16 more or a
+# calibrated as a whole (32 nodes on the taper panel, plus either 32 more or a
 # closed form on the plateau) against a converged reference, it is exercised on
 # every likelihood call, and a knob here would let a run silently pick a rule
 # nobody measured.  ``pairing_edge_nq``
 # remains configurable because it only serves the opt-in grid branch's rare
 # near-edge samples.
-PAIRING_PANEL_NQ: int = 16
+#
+# RAISED 16 -> 32 on 2026-09-06 because 16 did not hold the taper panel: see
+# :func:`get_pairing_panel_quadrature` for the measured corner and the cost.
+PAIRING_PANEL_NQ: int = 32
 
 
 @dataclass(frozen=True)
@@ -136,9 +139,12 @@ class NormalizationGridSettings:
     composite-Gauss-Legendre reference (256+32 sub-panels, self-converged to
     2e-16) in the 24 grid cells above the support edge: 22.6 nats with the
     pre-2026-08-28 fixed-q-grid clamp, 2.6e-3 with ``pairing_edge_nq = 24`` --
-    against 7.6e-3 for the EXACT branch itself at its 16 nodes per panel (3.1e-2
+    against 7.6e-3 for the EXACT branch itself at 16 nodes per panel (3.1e-2
     for the 200-node uniform q-trapezoid the panel split replaced, which did not
-    resolve the taper boundary layer at all).  ``pairing_edge_nq`` therefore may
+    resolve the taper boundary layer at all).  Those two figures were recorded
+    when ``PAIRING_PANEL_NQ`` was 16; on 2026-09-06 it became 32 and this
+    default moved 24 -> 48 with it, keeping the same 1.5x ratio and therefore
+    the same by-construction argument below.  ``pairing_edge_nq`` therefore may
     not drop BELOW ``PAIRING_PANEL_NQ`` and ``__post_init__`` rejects a value
     that does: it is what makes "the grid branch is never worse than the exact
     branch it approximates" (tests/test_pairing_edge_fix.py) hold BY
@@ -174,7 +180,7 @@ class NormalizationGridSettings:
     n_q: int = _env_int("DARKSIRENS_GW_N_Q", 200)
     n_chi: int = _env_int("DARKSIRENS_GW_N_CHI", 200)
     pairing_m1_grid: int | None = _env_int_opt("DARKSIRENS_GW_PAIRING_M1_GRID", None)
-    pairing_edge_nq: int = _env_int("DARKSIRENS_GW_PAIRING_EDGE_NQ", 24)
+    pairing_edge_nq: int = _env_int("DARKSIRENS_GW_PAIRING_EDGE_NQ", 48)
     pairing_edge_tol: float = _env_float("DARKSIRENS_GW_PAIRING_EDGE_TOL", 1.0e-4)
     m_lo: float = M_LO
     m_hi: float = M_HI
@@ -447,15 +453,15 @@ def get_pairing_panel_quadrature():
     ``q_a = m_shoulder/m1``: the integrand is a Planck-taper boundary layer below
     ``q_a`` and the bare (analytic) pairing kernel above it, so a single smooth
     rule has to resolve a corner that neither side actually has.  Splitting there
-    gives Gauss-Legendre two analytic pieces and lets 2 x 16 nodes beat the
-    200-node uniform trapezoid this replaced by 4x on the worst case and by
-    100-170x on the H0-CORRELATED part of the residual, which is the statistic
-    the cosmology actually sees (measured; see ``PairingModel._panel_nodes`` and
-    the module note on ``pairing_edge_tol``).
+    gives Gauss-Legendre two analytic pieces and lets a per-sample rule of a few
+    dozen nodes beat the 200-node uniform trapezoid this replaced by four orders
+    of magnitude on the H0-CORRELATED part of the residual, which is the
+    statistic the cosmology actually sees (measured; see
+    ``PairingModel._panel_nodes`` and the module note on ``pairing_edge_tol``).
 
     THOSE NUMBERS ARE FOR A ``q**beta`` KERNEL -- the pairing both production
     models use, and what the panel above the shoulder is analytic in.  A kernel
-    with a feature narrower than a panel is not resolved by any fixed 16-node
+    with a feature narrower than a panel is not resolved by any fixed-node
     rule and must declare that feature's edges through
     ``PairingModel._panel_edges`` (``GaussianPairing`` does); the node count
     itself stays a constant.
@@ -472,9 +478,31 @@ def get_pairing_panel_quadrature():
     prior [20, 140] (slope -1.04 nats) against 2.0e-4 (slope -2.8e-5) with the
     closed form.
 
-    16 is a calibrated pair, not a default to tune: 32 per panel buys another 4x
-    on the worst case (1.9e-3 nats) for twice the per-sample work, while the
-    residual at 16 already sits ~50x under the 0.05-nat H0-tilt budget.
+    32 IS A MEASURED FLOOR, NOT A DEFAULT TO TUNE, AND 16 WAS BELOW IT.  What
+    sets the node count is the taper panel, whose boundary layer narrows as m1
+    approaches ``m_min``: below the shoulder the whole q-support sits inside the
+    Planck taper, the plateau panel has zero width, and the residual left there
+    is coherent across the mass population -- so it tilts logL with H0 rather
+    than averaging out.  Measured end to end on the 259-event dark-siren
+    likelihood against a GL-256-per-panel reference, peak-to-peak over H0 in
+    [20, 140] with every other label pinned (nats)::
+
+        coordinate (beta_q, m2_low, delta_m2)        GL-16     GL-32
+        (-1.95, 3.05, 9.50), worst of 13 corners   6.98e-02  5.16e-06
+        (-1.95, 3.05, 8.00), worst of a 25-pt map  1.16e-01  8.50e-06
+        registered fiducial                        1.09e-03  3.17e-07
+
+    At 16 the worst corner is 1.4x OVER the campaign's 0.05-nat H0-tilt budget
+    and four of those 25 map points exceed it -- low ``m2_low``, wide taper,
+    steep negative ``beta_q``, a band inside the shipped prior rather than a
+    needle.  At 32 nothing on either map, or on the spectral configuration,
+    exceeds 1e-05.  The cost, measured on an H100 NVL with the 259-event
+    production configuration: +0.85 ms per likelihood call, 10.84 -> 11.69 ms
+    (1.078x), peak device memory unchanged at 9.92 GiB.  GL-48 (3.4e-09) and a
+    4x GL-16 composite (64 nodes, 8.3e-07) buy accuracy nobody needs for another
+    1.6 ms.  A maintainer lowering this constant must re-run that scan;
+    tests/test_pairing_panel_quadrature.py::test_worst_case_bound_over_the_full_prior_box
+    fails at 16.
 
     The node set is static -- it depends on no setting -- so the quadrature is a
     compile-time constant and a proposal never retraces on it.

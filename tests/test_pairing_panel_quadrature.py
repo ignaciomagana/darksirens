@@ -73,8 +73,15 @@ G5 = GWTC5FiducialBPL2PeaksPairing(ParamSpec(r"$\beta$", -2.0, 7.0),
                                    ParamSpec(r"$m_2$", 3.0, 10.0),
                                    ParamSpec(r"$\delta m_2$", 0.0, 10.0))
 
+# GL-16 sub-panels: only the composite REFERENCE uses these, and its accuracy
+# comes from the sub-panel count, not from the order of each piece.
 _GLX, _GLW = np.polynomial.legendre.leggauss(16)
 _GLT, _GLWT = 0.5 * (_GLX + 1.0), 0.5 * _GLW
+
+# The independent numpy MIRROR of the shipped rule must carry the shipped node
+# count, or it measures the difference of two rules instead of pinning one.
+_MGLX, _MGLW = np.polynomial.legendre.leggauss(U.PAIRING_PANEL_NQ)
+_MGLT, _MGLWT = 0.5 * (_MGLX + 1.0), 0.5 * _MGLW
 
 
 def _panels(m1, q_cut, q_a, n_sub):
@@ -108,7 +115,8 @@ def numpy_two_panel_norm(pair, m1, m_min, dm_min, theta):
     """INDEPENDENT NumPy reimplementation of the shipped rule (no scale factoring).
 
     Written from the specification -- ``q_cut = m_edge/m1``,
-    ``q_a = clip(m_shoulder/m1, q_cut, 1)``, GL-16 on the taper panel and the
+    ``q_a = clip(m_shoulder/m1, q_cut, 1)``, ``PAIRING_PANEL_NQ`` GL nodes on
+    the taper panel and the
     closed form ``(1 - q_a**(beta+1))/(beta+1)`` on the plateau, where the
     integrand is a bare ``q**beta`` -- not from the jax code, so agreement pins
     the implementation, not a shared helper.  ``beta`` is ``theta[0]`` for both
@@ -119,10 +127,10 @@ def numpy_two_panel_norm(pair, m1, m_min, dm_min, theta):
     q_cut = np.clip(float(m_edge) / m1, 0.0, 1.0)
     q_a = np.clip(float(m_shoulder) / m1, q_cut, 1.0)
     w = q_a - q_cut
-    qn = q_cut[:, None] + w[:, None] * _GLT
+    qn = q_cut[:, None] + w[:, None] * _MGLT
     p = np.asarray(pair._eval_unnorm(jnp.asarray(m1)[:, None], jnp.asarray(qn),
                                      m_min, dm_min, theta))
-    out = np.sum(p * _GLWT, axis=-1) * w
+    out = np.sum(p * _MGLWT, axis=-1) * w
     beta = float(theta[0])
     b1 = beta + 1.0
     plateau = (np.log(1.0 / q_a) if b1 == 0.0

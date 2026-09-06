@@ -304,7 +304,7 @@ class PairingModel(ABC):
         shoulder, and Gauss-Legendre is only near-exact on a panel the integrand
         is SMOOTH over on the scale of that panel's width.  Both production
         pairings clear that easily: above the shoulder they are a bare
-        ``q**beta``, which 16 nodes integrate to ~1e-16.  A kernel with a
+        ``q**beta``, which even 16 nodes integrate to ~1e-16.  A kernel with a
         FEATURE NARROWER THAN ITS PANEL does not, and it fails silently -- the
         rule simply misses the feature.  Such a subclass MUST declare the
         feature's edges here.  Measured, ``GaussianPairing`` before it did
@@ -352,7 +352,9 @@ class PairingModel(ABC):
         resolve.
 
         What the split buys is NOT mainly a smaller worst case -- 16 nodes per
-        panel are 7.6e-3 nats off near the support edge against the 200-node
+        panel (the count shipped until 2026-09-06; it is now
+        ``PAIRING_PANEL_NQ`` = 32) are 7.6e-3 nats off near the support edge
+        against the 200-node
         uniform trapezoid's 3.1e-2 (50 prior draws, composite-GL reference), only
         4x -- but a far smaller COHERENT error.  The trapezoid's residual is a
         one-sided endpoint deficit that does not self-average over the m1
@@ -565,7 +567,8 @@ class PairingModel(ABC):
             # cannot be lifted out of the per-sample loop.
             m1_a    = jnp.atleast_1d(m1)
             # TWO Gauss-Legendre panels split at the taper shoulder (see
-            # _panel_nodes / _panel_norm): 2 x 16 nodes per sample instead of the
+            # _panel_nodes / _panel_norm): 2 x PAIRING_PANEL_NQ nodes per
+            # sample instead of the
             # historical n_q = 200 uniform trapezoid, because the split removes
             # the one corner the integrand has and leaves GL two analytic
             # pieces.  That is 4x on the worst-case discretisation error and
