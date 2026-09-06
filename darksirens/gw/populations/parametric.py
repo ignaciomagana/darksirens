@@ -538,6 +538,20 @@ class GWTC5FiducialBPL2PeaksPairing(PairingModel):
     def param_specs(self):
         return [self.beta_spec, self.m2_low_spec, self.delta_m2_spec]
 
+    def _taper_shoulder(self, m_min, dm_min, theta):
+        """This model tapers on its OWN ``(m2_low, delta_m2)``, not the caller's.
+
+        ``_eval_unnorm`` below deletes ``m_min``/``dm_min``, so the normaliser's
+        panel split (``PairingModel._panel_nodes``) has to read the same
+        ``theta`` entries or it lands off the shoulder the integrand has.  The
+        production caller passes ``m2_low`` as ``m_min`` and they coincide, but
+        ``MixtureModel.component_densities`` would hand a shared pairing the MASS
+        component's ``(mmin, dmmin)`` instead.
+        """
+        del m_min, dm_min
+        m2_low, delta_m2 = theta[1], theta[2]
+        return m2_low, m2_low + delta_m2
+
     def _eval_unnorm(self, m1, q, m_min, dm_min, theta):
         del m_min, dm_min
         beta_q, m2_low, delta_m2 = theta

@@ -62,10 +62,10 @@ from jax import lax
 
 from .utils import (
     get_mass_grid,
-    get_q_grid,
     get_chi_grid,
     get_pairing_m1_grid,
     get_pairing_edge_quadrature,
+    get_pairing_panel_quadrature,
     normalization_grid_settings,
     M_LO,
     M_HI,
@@ -273,15 +273,35 @@ class PairingModel(ABC):
         """Evaluate the unnormalised conditional mass-ratio density."""
         ...
 
-    @staticmethod
-    def _support_nodes(m1, m_min):
-        r"""Support-relative q nodes and their spacing.
+    def _taper_shoulder(self, m_min, dm_min, theta):
+        r"""Lower support edge and taper shoulder of THIS pairing's own filter.
 
-        The q-support is ``(q_cut, 1]`` with ``q_cut = m_min/m1``: it depends on a
-        SAMPLED parameter and on the query m1.  Nodes are therefore placed
-        RELATIVE to the support, ``q = q_cut + t (1 - q_cut)`` with ``t`` the
-        unit-interval node set ``get_q_grid()`` (``[q_lo, q_hi] = [0, 1]``), so
-        they follow the edge instead of being crossed by it -- the same trick
+        Returns ``(m_edge, m_shoulder)`` in SECONDARY-mass units: ``_eval_unnorm``
+        is identically zero below ``m_edge`` and its taper is identically one at
+        and above ``m_shoulder``, so the two mark the ends of the boundary layer
+        the q-quadrature has to resolve.
+
+        The default reads the ``(m_min, dm_min)`` the caller passes, which is what
+        :class:`PowerLawPairing` and :class:`GaussianPairing` taper on.  A
+        subclass whose ``_eval_unnorm`` tapers on parameters of its OWN ``theta``
+        -- :class:`GWTC5FiducialBPL2PeaksPairing` does exactly that: it deletes
+        ``m_min``/``dm_min`` and uses ``(m2_low, delta_m2)`` -- MUST override this,
+        because the panel split below is only exact when it lands on the shoulder
+        the integrand actually has.  Nothing forces the two to agree: the
+        production caller happens to pass ``m2_low`` as ``m_min``, but
+        ``MixtureModel.component_densities`` hands a shared pairing the MASS
+        component's ``(mmin, dmmin)``.
+        """
+        del theta
+        return m_min, m_min + dm_min
+
+    def _panel_nodes(self, m1, m_min, dm_min, theta, t):
+        r"""Two support-relative q panels split at the taper shoulder.
+
+        The q-support is ``(q_cut, 1]`` with ``q_cut = m_edge/m1``: it depends on
+        a SAMPLED parameter and on the query m1.  Nodes are therefore placed
+        RELATIVE to the support, ``q = q_cut + t w``, so they follow the edge
+        instead of being crossed by it -- the same trick
         ``GWTC5FiducialBPL2PeaksMass._taper_window_grid`` uses for the mass taper.
 
         With the historical FIXED grid the normaliser
@@ -293,11 +313,65 @@ class PairingModel(ABC):
         spikes wherever a node happened to land inside the taper window (against a
         true value of ~0.03).  Support-relative nodes also spend every node inside
         the support, so the edge itself is resolved for any m1.
+
+        The support is then SPLIT at ``q_a = m_shoulder/m1`` (clipped into
+        ``[q_cut, 1]``).  ``p(q|m1)`` is a Planck taper rising from an exactly-zero
+        edge on ``[q_cut, q_a]``, and the bare pairing kernel -- ``q**beta`` for
+        both production models, the taper being identically 1.0 there
+        (``utils.sfilter_low`` returns a literal one at and above the shoulder) --
+        on ``[q_a, 1]``.  The joint integrand has a corner at ``q_a`` that neither
+        piece has, and a corner is exactly what a single smooth rule cannot
+        resolve.
+
+        What the split buys is NOT mainly a smaller worst case -- 16 nodes per
+        panel are 7.6e-3 nats off near the support edge against the 200-node
+        uniform trapezoid's 3.1e-2 (50 prior draws, composite-GL reference), only
+        4x -- but a far smaller COHERENT error.  The trapezoid's residual is a
+        one-sided endpoint deficit that does not self-average over the m1
+        population, so it tilts with H0 (m1src = m1det/(1+z(H0)) rescales the
+        whole population): measured over 259 events, the H0-correlated part of
+        the residual is 7.4e-3 .. 1.6e-1 nats for the trapezoid and
+        1.4e-4 .. 9.6e-4 nats for this rule, and on the real 259-event dark-siren
+        likelihood the trapezoid carries a -0.10-nat monotone slope across the
+        H0 prior [20, 140] where this rule carries +1.2e-3.  Amplitude is the
+        wrong statistic here; coherence is.
+
+        Either panel may collapse to zero width -- ``dm_min = 0`` kills panel A,
+        ``m_shoulder >= m1`` kills panel B, ``m_edge >= m1`` kills both -- and a
+        zero-width panel contributes exactly 0.0 to the sum (a finite integrand
+        times a zero width), so no branch is needed for them.
         """
-        t     = get_q_grid()                        # uniform nodes on [0, 1]
-        q_cut = jnp.clip(m_min / m1, 0.0, 1.0)
-        width = 1.0 - q_cut
-        return q_cut[..., None] + t * width[..., None], width, 1.0 / (t.size - 1)
+        m_edge, m_shoulder = self._taper_shoulder(m_min, dm_min, theta)
+        q_cut = jnp.clip(m_edge / m1, 0.0, 1.0)
+        q_a   = jnp.clip(m_shoulder / m1, q_cut, 1.0)
+        w_a   = q_a - q_cut
+        w_b   = 1.0 - q_a
+        return (q_cut[..., None] + t * w_a[..., None],
+                q_a[..., None] + t * w_b[..., None],
+                w_a, w_b)
+
+    def _panel_norm(self, m1, m_min, dm_min, theta, t, w):
+        r"""Scale-factored 2-panel normaliser ``(n_sc, scale)``; ``N = scale n_sc``.
+
+        Scale-invariant normalisation: for an m1 in the low-mass taper toe both
+        ``p`` and its q-integral are ~exp(-500)-tiny; the RATIO is well
+        conditioned, but a direct ``p / N`` has divide's VJP square ``N``, which
+        UNDERFLOWS to zero and turns the cotangent into inf -> NaN (measured: one
+        bright-mock injection at m1src = m_min + 0.01 poisoned the whole
+        ``d logL/d(m_min, dm_min, beta)`` gradient).  Factoring the row maximum
+        over BOTH panels' nodes out of the quadrature keeps every backward
+        division at O(1) scale; the forward value is the same integral up to
+        association order (ULP-level).
+        """
+        q_a_n, q_b_n, w_a, w_b = self._panel_nodes(m1, m_min, dm_min, theta, t)
+        p_a = self._eval_unnorm(m1[..., None], q_a_n, m_min, dm_min, theta)
+        p_b = self._eval_unnorm(m1[..., None], q_b_n, m_min, dm_min, theta)
+        scale = jnp.maximum(jnp.max(p_a, axis=-1, keepdims=True),
+                            jnp.max(p_b, axis=-1, keepdims=True))
+        scale_s = jnp.where(scale > 0, scale, 1.0)
+        n_sc = (jnp.sum(w * (p_a / scale_s), axis=-1) * w_a
+                + jnp.sum(w * (p_b / scale_s), axis=-1) * w_b)
+        return n_sc, scale_s[..., 0]
 
     def __call__(self, m1, q, m_min, dm_min, theta):
         p = self._eval_unnorm(m1, q, m_min, dm_min, theta)
@@ -323,25 +397,15 @@ class PairingModel(ABC):
             # PairingModel norm integrates over q for each m1 — sample-dependent,
             # cannot be lifted out of the per-sample loop.
             m1_a    = jnp.atleast_1d(m1)
-            q_nodes, width, dt = self._support_nodes(m1_a, m_min)
-            p_grid  = self._eval_unnorm(m1_a[..., None], q_nodes,
-                                       m_min, dm_min, theta)
-            # Scale-invariant normalisation: for an m1 in the low-mass taper toe
-            # both p and its q-integral are ~exp(-500)-tiny; the RATIO is well
-            # conditioned, but a direct p / n has divide's VJP square n, which
-            # UNDERFLOWS to zero and turns the cotangent into inf -> NaN
-            # (measured: one bright-mock injection at m1src = m_min + 0.01
-            # poisoned the whole d logL/d(m_min, dm_min, beta) gradient).
-            # Factoring the row maximum out of the quadrature keeps every
-            # backward division at O(1) scale; the forward value is the same
-            # ratio up to association order (ULP-level).
-            scale   = jnp.max(p_grid, axis=-1, keepdims=True)
-            scale_s = jnp.where(scale > 0, scale, 1.0)
-            # Uniform in t, so the trapezoid is dt-spaced and the support width
-            # (which carries the m1 / m_min dependence) factors out.
-            n_sc    = jnp.trapezoid(p_grid / scale_s, dx=dt, axis=-1) * width
+            # TWO Gauss-Legendre panels split at the taper shoulder (see
+            # _panel_nodes / _panel_norm): 2 x 16 nodes per sample instead of the
+            # historical n_q = 200 uniform trapezoid, at 1-2 ORDERS OF MAGNITUDE
+            # smaller discretisation error, because the split removes the one
+            # corner the integrand has and leaves GL two analytic pieces.
+            t_p, w_p = get_pairing_panel_quadrature()    # (16,) static nodes
+            n_sc, scale_p = self._panel_norm(m1_a, m_min, dm_min, theta, t_p, w_p)
             n_sc    = n_sc.reshape(jnp.shape(m1))
-            scale_m = scale_s[..., 0].reshape(jnp.shape(m1))
+            scale_m = scale_p.reshape(jnp.shape(m1))
             return jnp.where(
                 in_support & (n_sc > 0),
                 (p / scale_m) / jnp.where(n_sc > 0, n_sc, 1.0),
@@ -353,16 +417,13 @@ class PairingModel(ABC):
         # theta-traced) and interpolate log N in log m1 per sample.
         m1_grid = get_pairing_m1_grid()                     # (N_grid,) static nodes
         log_m1_grid = jnp.log(m1_grid)
-        # Same scale-factored, SUPPORT-RELATIVE quadrature as the exact branch,
-        # per grid node, so the grid normaliser never underflows while forming
-        # I = scale * n_sc and agrees with the exact branch node-for-node.
-        q_nodes_g, width_g, dt = self._support_nodes(m1_grid, m_min)
-        p_grid  = self._eval_unnorm(m1_grid[:, None], q_nodes_g,
-                                    m_min, dm_min, theta)    # (N_grid, N_Q)
-        scale   = jnp.max(p_grid, axis=-1, keepdims=True)
-        scale_s = jnp.where(scale > 0, scale, 1.0)
-        n_sc_g  = jnp.trapezoid(p_grid / scale_s, dx=dt, axis=-1) * width_g
-        I_grid  = scale_s[..., 0] * n_sc_g                   # (N_grid,) normaliser
+        # Same scale-factored, SUPPORT-RELATIVE 2-panel quadrature as the exact
+        # branch, per grid node, so the grid normaliser never underflows while
+        # forming I = scale * n_sc and agrees with the exact branch node-for-node.
+        t_p, w_p = get_pairing_panel_quadrature()
+        n_sc_g, scale_g = self._panel_norm(m1_grid, m_min, dm_min, theta,
+                                           t_p, w_p)
+        I_grid  = scale_g * n_sc_g                           # (N_grid,) normaliser
         # SUPPORT-EDGE HANDLING.  Nodes with no support have I == 0 exactly (for
         # every q, p_unnorm == 0 -- e.g. m1 <= m_min, so m2 = q*m1 <= m_min).  The
         # historical code floored those to log(1e-300) and interpolated THROUGH
@@ -455,16 +516,14 @@ class PairingModel(ABC):
         # m_min came out -7.7e3 against a true +1.67e7) is gone.
         t_e, w_e = get_pairing_edge_quadrature()             # (K,) static nodes
         m1_a     = jnp.atleast_1d(m1)
-        q_cut_s  = jnp.clip(m_min / m1_a, 0.0, 1.0)
-        width_s  = 1.0 - q_cut_s
-        q_e      = q_cut_s[..., None] + t_e * width_s[..., None]
-        p_e      = self._eval_unnorm(m1_a[..., None], q_e, m_min, dm_min, theta)
-        # Same scale factoring as the exact branch: p ~ exp(-130) in the taper
-        # toe, and a direct sum would underflow the backward divisions.
-        scale_e  = jnp.max(p_e, axis=-1, keepdims=True)
-        scale_es = jnp.where(scale_e > 0, scale_e, 1.0)
-        I_edge   = (jnp.sum((p_e / scale_es) * w_e, axis=-1) * width_s
-                    * scale_es[..., 0]).reshape(jnp.shape(m1))
+        # The SAME 2-panel rule as the exact branch, with pairing_edge_nq nodes
+        # per panel instead of 16.  Sharing the rule is what makes "the grid
+        # branch is never worse than the exact branch it approximates"
+        # (tests/test_pairing_edge_fix.py) hold by construction rather than by
+        # calibration: more nodes on an identical panel split is a strictly finer
+        # rule for the same integrand.
+        n_sc_e, scale_e = self._panel_norm(m1_a, m_min, dm_min, theta, t_e, w_e)
+        I_edge   = (n_sc_e * scale_e).reshape(jnp.shape(m1))
         edge_ok  = I_edge > 0
         # Safe log: an empty support gives I_edge == 0, and there p == 0 too, so
         # keep the interpolated value rather than build a -inf whose VJP is

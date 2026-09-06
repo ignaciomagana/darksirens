@@ -163,6 +163,63 @@ hold, the norms are rebuilt every proposal: measured on the 4-core CPU mock
 with `H0` and `Om0` sampled, 19.2 s/call of which 13.9 s of the remaining
 18.6 s (75%, by ablation) is that quadrature.
 
+## The pairing mass-ratio normaliser
+
+The conditional pairing density `p(q | m1)` is normalised per sample,
+`N(m1) = int_{q_cut}^{1} p(q | m1) dq` with `q_cut = m_min/m1`, twice per
+likelihood call (once on the PE set, once on the injections). Until 2026-09-05
+that integral was a 200-node uniform trapezoid on the support-relative interval,
+i.e. 200 density evaluations per sample; it is now **two 16-node Gauss-Legendre
+panels split at the taper shoulder** `q_a = (m_min + dm_min)/m1`, i.e. 32.
+
+The split is what makes 32 nodes beat 200. Below `q_a` the integrand is the
+Planck-taper boundary layer, above it the bare pairing kernel (`q**beta`) with
+the taper identically one, so the combined integrand has a corner at `q_a` that
+neither piece has. Gauss-Legendre resolves each smooth piece; a single rule
+spanning the corner does not. Each pairing model supplies its own shoulder
+(`PairingModel._taper_shoulder`), because `gwtc5_fiducial_bpl2peaks` tapers on
+its sampled `(m2_low, delta_m2)` rather than on the mixture's `(m_min, dm_min)`.
+
+There is **no flag**: the node count is a module constant
+(`darksirens.gw.populations.utils.PAIRING_PANEL_NQ`), calibrated as a pair
+against a converged reference and exercised on every call. In particular
+`--norm_nq` / `DARKSIRENS_GW_N_Q` no longer changes this quadrature — it still
+sizes `get_q_grid()` (the GP baselines and the stratified-q tables) and is still
+what the block-size resolver reads, so blocking plans are unchanged.
+
+Measured on this repository at `f770956` on an NVIDIA H100 NVL, float64,
+20 warm calls per launch, three interleaved launches per arm:
+
+| Configuration | Before | After | Speedup | Peak device memory |
+|---|---|---|---|---|
+| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 13.90 ms/call | 3.55 ms/call | 3.92x | 3.672 -> 0.776 GiB |
+| 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 59.2 ms/call | 48.1 ms/call | 1.23x | 22.620 -> 22.661 GiB |
+
+The absolute saving is the same ~10-11 ms in both; it is a larger fraction of
+the spectral call because that call has no catalog term. On the spectral
+configuration the pairing q-axis was also the dominant allocation, which is why
+the peak device memory falls 4.7x there and is flat (+0.2%) on the dark-siren
+configuration, whose blocking is unchanged.
+
+Accuracy is a **correction**, not a regression. Against a converged
+composite-Gauss-Legendre reference, holding the population and survey blocks at
+their fiducials and scanning `H0` across its full prior:
+
+| Configuration | Rule | Mean error | Trend across the H0 prior |
+|---|---|---|---|
+| 259-event dark sirens, H0 in [20, 140] | 200-node trapezoid | -0.349 nats | **-0.101 nats** |
+| | 2-panel GL-16 | +1.8e-4 nats | +1.2e-3 nats |
+| 259-event spectral, H0 in [20, 120] | 200-node trapezoid | -0.303 nats | +0.044 nats |
+| | 2-panel GL-16 | -1.1e-5 nats | +9.1e-7 nats |
+
+The trapezoid's residual is a one-sided endpoint deficit that does not
+self-average over the mass population, so it tilts with `H0`
+(`m1src = m1det/(1+z(H0))` rescales the whole population). Removing an
+H0-correlated systematic of -0.10 nats is the reason this change is admissible;
+the per-call worst-case improvement is only ~4x. Golden log-likelihoods move
+accordingly and were re-blessed (population registry: max 7.7e-5 nats, 1.5e-5
+relative, one-sided).
+
 ## Lensing
 
 Under `--partition_mode marginalize_exact` the lensing CLI makes ONE call to

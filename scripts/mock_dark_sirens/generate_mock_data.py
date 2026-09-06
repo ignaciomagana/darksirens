@@ -152,7 +152,18 @@ _trapz = _trapezoid
 # component densities then match the inference model to machine precision (cf.
 # tests/test_mock_generator_taper.py::test_pairing_matches_inference_component_densities).
 _MASS_NORM_GRID = np.linspace(1.0, 200.0, 500)
-_Q_NORM_GRID = np.linspace(0.0, 1.0, 200)
+# Mirrors darksirens.gw.populations.utils.get_pairing_panel_quadrature() (kept
+# numpy-only for the same reason the taper filters above are: this generator
+# stays importable without the darksirens package).  Since 2026-09-05 the
+# inference normalises p(q | m1) on TWO Gauss-Legendre panels split at the taper
+# shoulder, 16 nodes each, in place of a 200-node uniform q trapezoid, and the
+# mock must use the SAME rule or the stored pdraw and the inference target
+# disagree by the difference of two quadratures (measured 5.4e-4 relative,
+# against the 1e-5 tests/test_mock_generator_taper.py allows).
+_PAIR_PANEL_NQ = 16
+_PAIR_GL_X, _PAIR_GL_W = np.polynomial.legendre.leggauss(_PAIR_PANEL_NQ)
+_PAIR_GL_T = 0.5 * (_PAIR_GL_X + 1.0)
+_PAIR_GL_WT = 0.5 * _PAIR_GL_W
 
 # Pairing secondary-mass taper.  The inference resolves ONE low-mass edge for the
 # whole mixture (``MixtureModel._low_mass_edge``, darksirens/gw/populations/base.py):
@@ -353,34 +364,42 @@ def _pair_pdf(q: np.ndarray, m1: np.ndarray, m_min: float, dm: float, beta: floa
 
     * unnormalised ``q**beta * S_low(q*m1; m_min, dm)`` with a HARD zero for
       ``m2 = q*m1 < m_min`` and the ``q>0`` safe-power guard;
-    * per-``m1`` normalisation by trapezoid over the SUPPORT-RELATIVE nodes the
-      inference uses (``_Q_NORM_GRID`` == get_q_grid() mapped onto [q_cut, 1])
-      with the row-maximum factored out of the quadrature.  Factoring the row max
-      is a backward-pass conditioning trick in the inference; here it only changes
-      the association order, so the forward density equals ``unnorm / trapz(unnorm)``
-      up to ULP while staying bit-comparable to the inference quadrature.
+    * per-``m1`` normalisation on the SAME two Gauss-Legendre panels the inference
+      uses (``PairingModel._panel_nodes``: support-relative nodes split at the
+      taper shoulder ``q_a = (m_min + dm)/m1``, ``_PAIR_PANEL_NQ`` per panel) with
+      the row-maximum over BOTH panels factored out of the quadrature.  Factoring
+      the row max is a backward-pass conditioning trick in the inference; here it
+      only changes the association order, so the forward density equals
+      ``unnorm / int(unnorm)`` up to ULP while staying bit-comparable to the
+      inference quadrature.
 
     ``m_min``/``dm`` are the mixture's pairing floor (``pop.mmin``, ``pop.dm_min``).
     """
     q = np.atleast_1d(np.asarray(q, dtype=float))
     m1 = np.atleast_1d(np.asarray(m1, dtype=float))
-    # SUPPORT-RELATIVE nodes, q = q_cut + t (1 - q_cut) with t = _Q_NORM_GRID on
-    # [0, 1] and q_cut = m_min/m1: the inference places them the same way
-    # (PairingModel._support_nodes) because the support edge is a sampled quantity,
-    # so a fixed q grid makes the normaliser a staircase in m1 and m_min.
-    t = _Q_NORM_GRID
+    # SUPPORT-RELATIVE nodes, q = q_cut + t w with q_cut = m_min/m1: the inference
+    # places them the same way (PairingModel._panel_nodes) because the support
+    # edge is a sampled quantity, so a fixed q grid makes the normaliser a
+    # staircase in m1 and m_min.  The support is SPLIT at the taper shoulder,
+    # where the integrand's only corner sits.
+    t = _PAIR_GL_T
+    w = _PAIR_GL_WT
     q_cut = np.clip(m_min / m1, 0.0, 1.0)
-    width = 1.0 - q_cut
-    qg = q_cut[:, None] + t[None, :] * width[:, None]     # (N, Nq)
-    m2g = qg * m1[:, None]                                # (N, Nq)
-    # Row grid of the unnormalised pairing (safe q>0 power + hard m2<m_min zero).
-    safe_qg = np.where(qg > 0.0, qg, 1.0)
-    pg = np.where(qg > 0.0, safe_qg ** beta, 0.0) * _sfilter_low(m2g, m_min, dm)
-    pg = np.where(m2g < m_min, 0.0, pg)
-    scale = np.max(pg, axis=-1, keepdims=True)            # row max (base.py:221)
+    q_a = np.clip((m_min + dm) / m1, q_cut, 1.0)
+    w_a = q_a - q_cut
+    w_b = 1.0 - q_a
+    pgs = []
+    for lo_, wid_ in ((q_cut, w_a), (q_a, w_b)):
+        qg = lo_[:, None] + t[None, :] * wid_[:, None]    # (N, 16)
+        m2g = qg * m1[:, None]
+        safe_qg = np.where(qg > 0.0, qg, 1.0)
+        pg = np.where(qg > 0.0, safe_qg ** beta, 0.0) * _sfilter_low(m2g, m_min, dm)
+        pgs.append(np.where(m2g < m_min, 0.0, pg))
+    scale = np.maximum(np.max(pgs[0], axis=-1, keepdims=True),
+                       np.max(pgs[1], axis=-1, keepdims=True))
     scale_s = np.where(scale > 0.0, scale, 1.0)
-    n_sc = (_trapz(pg / scale_s, dx=1.0 / (t.size - 1), axis=-1)
-            * width)                                     # (N,) scaled norm
+    n_sc = (np.sum(w[None, :] * (pgs[0] / scale_s), axis=-1) * w_a
+            + np.sum(w[None, :] * (pgs[1] / scale_s), axis=-1) * w_b)
     scale_m = scale_s[:, 0]
     # Same unnormalised form at the requested q.
     safe_q = np.where(q > 0.0, q, 1.0)
