@@ -15,7 +15,13 @@ hands Gauss-Legendre two smooth pieces.
 What these tests pin
 --------------------
 1. The rule is what it says it is: an INDEPENDENT NumPy reimplementation of the
-   two-panel split reproduces the shipped normaliser to floating point.
+   two-panel split reproduces the shipped normaliser to floating point.  Since
+   2026-09-06 the upper panel is a closed form rather than a quadrature
+   (``PairingModel._plateau_integral``, pinned in
+   ``tests/test_pairing_plateau_closed_form.py``), so the reimplementation
+   integrates it in closed form too; everything below is unchanged by that, and
+   the ``reference_norm`` these bounds are measured against is still a pure
+   composite Gauss-Legendre rule.
 2. The BOUND: worst |Delta log N| against a composite-Gauss-Legendre reference
    over prior draws, both NEAR THE SUPPORT EDGE (7.6e-3 nats) and over the FULL
    prior box (4.6e-2, at m_min = 2, dm_min = 0, beta = -2, m1 = 250 -- the error
@@ -98,21 +104,26 @@ def numpy_two_panel_norm(pair, m1, m_min, dm_min, theta):
     """INDEPENDENT NumPy reimplementation of the shipped rule (no scale factoring).
 
     Written from the specification -- ``q_cut = m_edge/m1``,
-    ``q_a = clip(m_shoulder/m1, q_cut, 1)``, GL-16 on each panel -- not from the
-    jax code, so agreement pins the implementation, not a shared helper.
+    ``q_a = clip(m_shoulder/m1, q_cut, 1)``, GL-16 on the taper panel and the
+    closed form ``(1 - q_a**(beta+1))/(beta+1)`` on the plateau, where the
+    integrand is a bare ``q**beta`` -- not from the jax code, so agreement pins
+    the implementation, not a shared helper.  ``beta`` is ``theta[0]`` for both
+    production pairings.
     """
     m1 = np.atleast_1d(np.asarray(m1, dtype=float))
     m_edge, m_shoulder = pair._taper_shoulder(m_min, dm_min, theta)
     q_cut = np.clip(float(m_edge) / m1, 0.0, 1.0)
     q_a = np.clip(float(m_shoulder) / m1, q_cut, 1.0)
-    out = np.zeros(m1.shape)
-    for lo, hi in ((q_cut, q_a), (q_a, np.ones_like(q_a))):
-        w = hi - lo
-        qn = lo[:, None] + w[:, None] * _GLT
-        p = np.asarray(pair._eval_unnorm(jnp.asarray(m1)[:, None], jnp.asarray(qn),
-                                         m_min, dm_min, theta))
-        out += np.sum(p * _GLWT, axis=-1) * w
-    return out
+    w = q_a - q_cut
+    qn = q_cut[:, None] + w[:, None] * _GLT
+    p = np.asarray(pair._eval_unnorm(jnp.asarray(m1)[:, None], jnp.asarray(qn),
+                                     m_min, dm_min, theta))
+    out = np.sum(p * _GLWT, axis=-1) * w
+    beta = float(theta[0])
+    b1 = beta + 1.0
+    plateau = (np.log(1.0 / q_a) if b1 == 0.0
+               else (1.0 - q_a ** b1) / b1)
+    return out + np.where(q_a < 1.0, plateau, 0.0)
 
 
 def shipped_norm(pair, m1, m_min, dm_min, theta):

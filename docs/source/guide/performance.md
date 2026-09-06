@@ -180,6 +180,15 @@ spanning the corner does not. Each pairing model supplies its own shoulder
 (`PairingModel._taper_shoulder`), because `gwtc5_fiducial_bpl2peaks` tapers on
 its sampled `(m2_low, delta_m2)` rather than on the mixture's `(m_min, dm_min)`.
 
+Being bare above the shoulder, that upper panel is **not quadratured at all**
+for either production pairing: `PairingModel._plateau_integral` returns
+`int_{q_a}^{1} q**beta dq = (1 - q_a**(beta+1))/(beta+1)` (the `beta -> -1` limit
+`-log q_a` is a live branch — `beta` is sampled over `[-2, 7]`), so those models
+spend 16 nodes per sample, not 32, and the remaining nodes all sit in the
+boundary layer. A pairing without an analytic plateau — `GaussianPairing`, or
+any out-of-tree model — does not implement the hook and keeps the
+Gauss-Legendre panel unchanged.
+
 Sixteen nodes per panel are calibrated for a `q**beta` kernel — what both
 production pairings are above the shoulder. A pairing model whose kernel carries
 a feature *narrower than a panel* is not resolved by any fixed 16-node rule and
@@ -199,9 +208,15 @@ Measured on this repository at `f770956` on an NVIDIA H100 NVL, float64,
 
 | Configuration | Before | After | Speedup | Peak device memory |
 |---|---|---|---|---|
-| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 13.90 ms/call | 3.55 ms/call | 3.92x | 3.672 -> 0.776 GiB |
-| 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 59.2 ms/call | 48.1 ms/call | 1.23x | 22.620 -> 22.661 GiB |
+| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 13.90 ms/call | 2.88 ms/call | 4.83x | 3.672 -> 0.640 GiB |
+| 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 59.2 ms/call | 46.6 ms/call | 1.27x | 22.620 -> 22.661 GiB |
 | the same run on the shipped sbatch pins (`--sel_batch_size 131072 --pe_event_block 32`) | 68.8 ms/call | 58.8 ms/call | 1.16x | — |
+
+The closed plateau is the last 0.69 ms of the spectral row (3.57 -> 2.88 ms,
+1.24x, and the 0.776 -> 0.640 GiB of the memory column) and 0.90 ms of the
+dark-siren row (47.49 -> 46.59 ms, 1.02x), measured as three interleaved
+launches per arm; the dark-siren peak memory is unmoved by it (22.620 GiB in
+both arms of that A/B), because the catalog KDE, not the q axis, sets it.
 
 The absolute saving is the same ~10-11 ms in all three; it is a larger fraction
 of the spectral call because that call has no catalog term, and a smaller one on
@@ -221,8 +236,28 @@ their fiducials and scanning `H0` across its full prior:
 |---|---|---|---|
 | 259-event dark sirens, H0 in [20, 140] | 200-node trapezoid | -0.349 nats | **-0.101 nats** |
 | | 2-panel GL-16 | +1.8e-4 nats | +1.2e-3 nats |
+| | GL-16 + closed plateau | +1.8e-4 nats | +1.2e-3 nats |
 | 259-event spectral, H0 in [20, 120] | 200-node trapezoid | -0.303 nats | +0.044 nats |
 | | 2-panel GL-16 | -1.1e-5 nats | +9.1e-7 nats |
+| | GL-16 + closed plateau | -1.1e-5 nats | +9.1e-7 nats |
+
+At the fiducial population the closed plateau changes nothing measurable (the
+two rules differ by 2.1e-8 nats across the whole dark-siren H0 prior, and not at
+all on the spectral one). It matters at **steep negative `beta`**, where the
+plateau integrand `q**beta` is itself a boundary layer at `q_a = m_shoulder/m1`
+— which shrinks like `1/m1`, so the Gauss-Legendre residual grows with `m1` and
+does not self-average over the mass population. Repeating the same scan with
+`(beta_q, m2_low, delta_m2) = (-1.9, 3.05, 1.15)`, inside the shipped prior:
+
+| Rule | Error across the H0 prior [20, 140] | Trend |
+|---|---|---|
+| 2-panel GL-16 | 0.93 nats peak-to-peak | **-1.04 nats** |
+| GL-16 + closed plateau | 2.0e-4 nats peak-to-peak | -2.8e-5 nats |
+
+So the closed form removes an H0-correlated systematic twenty times over the
+0.05-nat budget in a corner of the prior a sampler visits. Over a 400-draw prior
+box (600 log-spaced `m1` each) the worst `|Delta log N|` also falls, 6.7e-3 nats
+to 4.6e-3, and no draw gets worse.
 
 The trapezoid's residual is a one-sided endpoint deficit that does not
 self-average over the mass population, so it tilts with `H0`
