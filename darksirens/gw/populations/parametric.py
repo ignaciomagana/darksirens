@@ -538,6 +538,20 @@ class GWTC5FiducialBPL2PeaksPairing(PairingModel):
     def param_specs(self):
         return [self.beta_spec, self.m2_low_spec, self.delta_m2_spec]
 
+    def _taper_shoulder(self, m_min, dm_min, theta):
+        """This model tapers on its OWN ``(m2_low, delta_m2)``, not the caller's.
+
+        ``_eval_unnorm`` below deletes ``m_min``/``dm_min``, so the normaliser's
+        panel split (``PairingModel._panel_nodes``) has to read the same
+        ``theta`` entries or it lands off the shoulder the integrand has.  The
+        production caller passes ``m2_low`` as ``m_min`` and they coincide, but
+        ``MixtureModel.component_densities`` would hand a shared pairing the MASS
+        component's ``(mmin, dmmin)`` instead.
+        """
+        del m_min, dm_min
+        m2_low, delta_m2 = theta[1], theta[2]
+        return m2_low, m2_low + delta_m2
+
     def _eval_unnorm(self, m1, q, m_min, dm_min, theta):
         del m_min, dm_min
         beta_q, m2_low, delta_m2 = theta
@@ -1258,6 +1272,42 @@ class GaussianPairing(PairingModel):
     def param_specs(self):
         """Return ``mu_q`` and ``sigma_q`` parameter specs."""
         return [self.mu_q_spec, self.sigma_q_spec]
+
+    #: Half-width, in units of ``sigma_q``, of the panel this model puts around
+    #: ``mu_q``.  5 sigma leaves 5.7e-7 of the Gaussian's mass outside that panel
+    #: -- and the neighbouring panels integrate that tail anyway, they just do it
+    #: less accurately.
+    _PANEL_SIGMA_SPAN = 5.0
+
+    def _panel_edges(self, m1, m_min, dm_min, theta):
+        r"""Split the q-support at ``mu_q -/+ 5 sigma_q`` as well.
+
+        Unlike both production pairings, this kernel has a FEATURE -- a Gaussian
+        of width ``sigma_q`` -- that can be far narrower than the panel above the
+        taper shoulder, and Gauss-Legendre cannot see a feature it straddles no
+        nodes of.  Measured against a Gauss-Kronrod reference (scipy.quad,
+        epsrel 1e-13, broken at the panel edges), worst |Delta log p| over nine
+        (mu_q, sigma_q, m_min, dm_min, m1) corners with sigma_q from 0.001 to
+        0.5: 2.7e+01 nats with the base class's two panels, 6.7e-7 with these
+        edges declared.  At the single corner the review flagged
+        (mu_q = 0.5, sigma_q = 0.02, m_min = 5, dm_min = 3, m1 = 60) it is
+        2.7e-1 -> 9.8e-8, and 5.5e-1 -> 9.8e-8 at dm_min = 0.05.  Wide kernels
+        are unaffected: at the ``sigma_q = 0.2`` the test suite exercises, both
+        rules are already at 4e-13.
+
+        5 sigma is the measured optimum of the span, not a round number: the
+        same corner sweep gives 2.7e-3 (3 sigma), 6.3e-5 (4), 6.7e-7 (5),
+        4.9e-6 (6), 7.2e-4 (8) -- too narrow truncates the core into the outer
+        panels, too wide stops resolving it inside the central one.
+
+        The edges are clipped and sorted by :meth:`PairingModel._panel_nodes`,
+        so a ``mu_q`` below the shoulder or above 1 costs a zero-width panel,
+        not a wrong answer.
+        """
+        del m1, m_min, dm_min
+        mu, sig = theta[0], theta[1]
+        half = self._PANEL_SIGMA_SPAN * sig
+        return (mu - half, mu + half)
 
     def _eval_unnorm(self, m1, q, m_min, dm_min, t):
         """Evaluate the unnormalised conditional density ``p(q | m1)``."""

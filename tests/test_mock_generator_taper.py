@@ -277,14 +277,38 @@ def _inference_model():
     return model, theta
 
 
+def test_pairing_quadrature_mirrors_the_package(gen):
+    """The mock's hand-mirrored panel rule IS the package's, node for node.
+
+    ``generate_mock_data`` stays importable without jax / the darksirens
+    package, so it re-derives the pairing normaliser's quadrature in plain numpy
+    (``_PAIR_PANEL_NQ`` / ``_PAIR_GL_T`` / ``_PAIR_GL_WT``).  A drift between the
+    two would ship a stored ``pdraw`` computed with a different quadrature than
+    the inference target -- 5.4e-4 relative for the 16-vs-200 case that motivated
+    the split -- and the component-density comparison above would NOT catch it:
+    that residual is dominated by the mock's mass grid and measures 4.9e-6 with
+    the package at 16, 24, 32 or 64 nodes per panel alike (and 9.7e-6, still
+    under its 1e-5 gate, at a plainly wrong 8).  So pin the mirror structurally.
+    """
+    U = pytest.importorskip("darksirens.gw.populations.utils")
+    assert gen._PAIR_PANEL_NQ == U.PAIRING_PANEL_NQ
+    t, w = U.get_pairing_panel_quadrature()
+    np.testing.assert_array_equal(np.asarray(t), gen._PAIR_GL_T)
+    np.testing.assert_array_equal(np.asarray(w), gen._PAIR_GL_WT)
+
+
 def test_pairing_matches_inference_component_densities(gen):
     """The generator's ``_mass_spin_pdf`` equals the inference mixture density.
 
     At z=0 the ``(1+z)**(gamma-1)`` factor is 1, so
     ``exp(model.log_p_pop(m1, q, 0, chi, theta)) == mixture(m1, q, chi)``, which
     is precisely the mixture pairing the generator must reproduce.  The
-    mock normalises its pairing density on the SAME support-relative nodes the
-    inference uses (_Q_NORM_GRID == get_q_grid() mapped onto [q_cut, 1]) and its
+    mock normalises its pairing density with the SAME two-panel Gauss-Legendre
+    rule the inference uses (support-relative nodes split at the taper shoulder,
+    ``_PAIR_PANEL_NQ`` per panel -- pinned elementwise against the package by
+    :func:`test_pairing_quadrature_mirrors_the_package`, because THIS test
+    cannot see a node-count drift: its residual is dominated by the mass grid
+    and stays 4.9e-6 whether the package uses 16, 24, 32 or 64 nodes) and its
     mass/spin densities on the same trapezoid grids (_MASS_NORM_GRID ==
     get_mass_grid()).  The inference normalises the tapered power law and the
     Gaussian peak in CLOSED FORM, so the residual is that grid's O((h/sigma)^2)

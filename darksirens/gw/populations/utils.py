@@ -88,6 +88,16 @@ def _min_pairing_m1_grid(m_lo: float, pairing_m_hi: float, n_q: int) -> int:
     return 1 + int(math.ceil(math.log(pairing_m_hi / m_lo) * (int(n_q) - 1)))
 
 
+# Node count of EACH of the two Gauss-Legendre panels the pairing normaliser is
+# integrated on (see ``PairingModel._panel_norm``).  Deliberately a module
+# constant and NOT a setting: the rule is calibrated as a pair (16 + 16) against
+# a converged reference, it is exercised on every likelihood call, and a knob
+# here would let a run silently pick a rule nobody measured.  ``pairing_edge_nq``
+# remains configurable because it only serves the opt-in grid branch's rare
+# near-edge samples.
+PAIRING_PANEL_NQ: int = 16
+
+
 @dataclass(frozen=True)
 class NormalizationGridSettings:
     """Settings controlling GW-population normalisation quadrature grids.
@@ -108,22 +118,41 @@ class NormalizationGridSettings:
     OWN support with the Gauss-Legendre rule below.
 
     ``pairing_edge_nq`` (env ``DARKSIRENS_GW_PAIRING_EDGE_NQ``) is the node count
-    of that per-sample edge rule and ``pairing_edge_tol`` (env
+    PER PANEL of that per-sample edge rule and ``pairing_edge_tol`` (env
     ``DARKSIRENS_GW_PAIRING_EDGE_TOL``) the interpolation-error budget, in nats,
     that decides which samples take it: a grid node is TRUSTED when the second
     difference of log I over 8 -- the linear-interpolation error bound on a
     uniform-in-log-m1 grid -- is within ``pairing_edge_tol`` and no zero-support
-    node lies within one cell.  Measured over 50 (m_min, dm_min, beta) prior
-    draws, worst |Delta log density| against a converged 200001-node reference in
-    the 24 grid cells above the support edge: 22.6 nats with the pre-2026-08-28
-    fixed-q-grid clamp, 3.4e-3 with ``pairing_edge_nq = 24`` -- against 3.1e-2 for
-    the EXACT branch itself, whose 200-node uniform q-trapezoid does not resolve
-    the taper boundary layer there.  Raising ``pairing_edge_nq`` costs that many
-    ``_eval_unnorm`` evaluations per sample (against ``n_q`` for the exact
-    branch); lowering ``pairing_edge_tol`` routes more samples onto the rule,
-    which is NOT uniformly better -- the m1 grid wins in the bulk of the support
-    (measured, beta = -2 with a narrow taper: 0.19 nats for the rule alone
-    against 2e-5 for the interpolant).
+    node lies within one cell.  Since 2026-09-05 the edge rule is the SAME
+    two-panel Gauss-Legendre split as the exact branch (see
+    ``get_pairing_panel_quadrature`` and ``PairingModel._panel_norm``), just at
+    ``pairing_edge_nq`` nodes per panel instead of ``PAIRING_PANEL_NQ``.  Measured
+    over 50 (m_min, dm_min, beta) prior draws, worst |Delta log density| against a
+    composite-Gauss-Legendre reference (256+32 sub-panels, self-converged to
+    2e-16) in the 24 grid cells above the support edge: 22.6 nats with the
+    pre-2026-08-28 fixed-q-grid clamp, 2.6e-3 with ``pairing_edge_nq = 24`` --
+    against 7.6e-3 for the EXACT branch itself at its 16 nodes per panel (3.1e-2
+    for the 200-node uniform q-trapezoid the panel split replaced, which did not
+    resolve the taper boundary layer at all).  ``pairing_edge_nq`` therefore may
+    not drop BELOW ``PAIRING_PANEL_NQ`` and ``__post_init__`` rejects a value
+    that does: it is what makes "the grid branch is never worse than the exact
+    branch it approximates" (tests/test_pairing_edge_fix.py) hold BY
+    CONSTRUCTION for the samples that take this rule -- a strictly finer rule on
+    an identical panel split -- rather than by calibration; at 8 nodes per panel
+    it degrades to 6.2e-1 nats.  (For the TRUSTED samples, which take
+    ``jnp.interp`` of log I and are constrained by no node count, that invariant
+    holds by MEASUREMENT only: the smallest margin over that test's corners is
+    1.45x, at m_min = 2, dm_min = 10, beta = 0 with N_grid = 2048, against 199x
+    at the other end.)  Raising it costs ``2 * pairing_edge_nq``
+    ``_eval_unnorm`` evaluations per sample (against ``2 * PAIRING_PANEL_NQ`` for
+    the exact branch).  Lowering ``pairing_edge_tol`` routes more samples onto
+    that rule, which since the panel split is no longer a trade: measured at
+    beta = -2 with a narrow taper over the bulk of the support, the rule alone is
+    1.8e-6 nats against 3.2e-4 for the interpolant (whose residual there is not
+    interpolation at all but the 16-node panel rule its grid nodes are built on --
+    the two agree to every printed digit).  It used to be the other way round
+    (0.19 nats for the single-panel rule against 2e-5 for the interpolant); that
+    warning belonged to the pre-2026-09-05 rule and no longer applies.
 
     ``pairing_m_hi`` is the UPPER bound of that opt-in pairing m1 grid.  It is a
     SEPARATE knob from the mass-grid ceiling ``m_hi`` precisely so that sizing
@@ -163,8 +192,17 @@ class NormalizationGridSettings:
                 raise ValueError(f"pairing_m1_grid must be >= 2 or None, got {pg}")
             object.__setattr__(self, "pairing_m1_grid", pg)
         pe = int(self.pairing_edge_nq)
-        if pe < 2:
-            raise ValueError(f"pairing_edge_nq must be >= 2, got {pe}")
+        # The grid branch's near-edge rule is the exact branch's own panel split
+        # at MORE nodes per panel; below PAIRING_PANEL_NQ it stops being a finer
+        # rule and the "never worse than the branch it approximates" invariant
+        # inverts (measured: 6.2e-1 nats at 8 nodes per panel against 7.6e-3 for
+        # the exact branch).  Fail closed rather than silently degrade.
+        if pe < PAIRING_PANEL_NQ:
+            raise ValueError(
+                f"pairing_edge_nq must be >= PAIRING_PANEL_NQ "
+                f"({PAIRING_PANEL_NQ}), got {pe} "
+                f"(env DARKSIRENS_GW_PAIRING_EDGE_NQ)"
+            )
         object.__setattr__(self, "pairing_edge_nq", pe)
         pt = float(self.pairing_edge_tol)
         if not pt > 0.0:
@@ -396,13 +434,53 @@ def _gauss_legendre_01(n: int):
         return jnp.asarray(0.5 * (x + 1.0)), jnp.asarray(0.5 * w)
 
 
+def get_pairing_panel_quadrature():
+    """Gauss-Legendre nodes/weights on (0, 1) for ONE pairing normaliser panel.
+
+    ``PairingModel.__call__`` integrates ``N(m1) = int p(q|m1) dq`` over the
+    support ``(q_cut, 1]`` as TWO panels split at the taper shoulder
+    ``q_a = m_shoulder/m1``: the integrand is a Planck-taper boundary layer below
+    ``q_a`` and the bare (analytic) pairing kernel above it, so a single smooth
+    rule has to resolve a corner that neither side actually has.  Splitting there
+    gives Gauss-Legendre two analytic pieces and lets 2 x 16 nodes beat the
+    200-node uniform trapezoid this replaced by 4x on the worst case and by
+    100-170x on the H0-CORRELATED part of the residual, which is the statistic
+    the cosmology actually sees (measured; see ``PairingModel._panel_nodes`` and
+    the module note on ``pairing_edge_tol``).
+
+    THOSE NUMBERS ARE FOR A ``q**beta`` KERNEL -- the pairing both production
+    models use, and what the panel above the shoulder is analytic in.  A kernel
+    with a feature narrower than a panel is not resolved by any fixed 16-node
+    rule and must declare that feature's edges through
+    ``PairingModel._panel_edges`` (``GaussianPairing`` does); the node count
+    itself stays a constant.
+
+    16 is a calibrated pair, not a default to tune: 32 per panel buys another 4x
+    on the worst case (1.9e-3 nats) for twice the per-sample work, while the
+    residual at 16 already sits ~50x under the 0.05-nat H0-tilt budget.
+
+    The node set is static -- it depends on no setting -- so the quadrature is a
+    compile-time constant and a proposal never retraces on it.
+    """
+    return _gauss_legendre_01(PAIRING_PANEL_NQ)
+
+
 @lru_cache(maxsize=1)
 def get_pairing_edge_quadrature():
-    """Gauss-Legendre nodes/weights on (0, 1) for the per-sample edge rule.
+    """Gauss-Legendre nodes/weights on (0, 1) for ONE panel of the edge rule.
 
     ``PairingModel.__call__``'s grid branch integrates I(m1) on the SAMPLE'S OWN
-    support, ``q = q_cut + t (1 - q_cut)``, wherever the m1 interpolant is not
-    trustworthy.  The integrand there is the taper boundary layer
+    support wherever the m1 interpolant is not trustworthy.  Since 2026-09-05 it
+    does so with the SAME two-panel split as the exact branch
+    (``PairingModel._panel_norm``), only at ``pairing_edge_nq`` nodes per panel
+    instead of ``PAIRING_PANEL_NQ`` (``NormalizationGridSettings.__post_init__``
+    rejects a smaller value) -- which is what makes the grid branch provably
+    never worse than the branch it approximates ON THE SAMPLES THAT TAKE IT, the
+    invariant tests/test_pairing_edge_fix.py asserts; the trusted, interpolated
+    samples that test also covers are constrained by measurement, not by node
+    count.
+
+    The integrand below the shoulder is the taper boundary layer
     ``S(m_min + t (m1 - m_min))``, of width ``A^-1 = (m1 - m_min)/dm_min`` in
     ``t``; Gauss-Legendre resolves a layer of width ``1/A`` with ~``sqrt(A)``
     nodes where a uniform rule needs ~``A`` of them, which is what makes a

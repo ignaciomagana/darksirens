@@ -304,7 +304,10 @@ def add_normalization_grid_arguments(group):
         help="Mass-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_MASS).")
     group.add_argument(
         "--norm_nq", type=int, default=None, metavar="N",
-        help="Mass-ratio-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_Q).")
+        help="Mass-ratio-grid size for the GP baselines and the stratified-q "
+             "normalisation (env: DARKSIRENS_GW_N_Q).  Since 2026-09-05 it does "
+             "NOT size the pairing normaliser, which uses a fixed two-panel "
+             "Gauss-Legendre rule; see the performance guide.")
     group.add_argument(
         "--norm_nchi", type=int, default=None, metavar="N",
         help="Spin-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_CHI).")
