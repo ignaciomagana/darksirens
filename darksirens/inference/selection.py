@@ -50,9 +50,14 @@ import jax.numpy as jnp
 from jax import lax
 from jax.scipy.special import logsumexp
 
+import os
+
 from darksirens.utils.utils import logdiffexp
 from darksirens.utils.containers import GWEvent, EMCatalog
 from darksirens.inference.events import pad_gw_event_to_multiple
+
+_NEFF_FLOOR_FACTOR = float(os.environ.get("DARK_SIREN_NEFF_FLOOR_FACTOR", 5.0))
+_NEFF_FLOOR_ABS = os.environ.get("DARK_SIREN_NEFF_FLOOR_ABS")
 
 
 # ============================================================
@@ -110,8 +115,8 @@ def selection_log_correction(
     """
     Log selection correction term (Farr 2019 / Talbot & Golomb 2023).
 
-    Returns ``-inf`` when N_eff < 5 * N_obs (Vitale et al. 2022 criterion),
-    indicating the injection set is too sparse for a reliable estimate.
+    Returns ``-inf`` when N_eff <= ``_NEFF_FLOOR_FACTOR`` * N_obs, indicating the
+    injection set is too sparse for a reliable estimate.
 
     The correction is:
 
@@ -130,7 +135,9 @@ def selection_log_correction(
     -------
     Scalar log-likelihood contribution from the selection term.
     """
-    too_sparse = Neff <= 5 * nEvents
+    floor = (float(_NEFF_FLOOR_ABS) if _NEFF_FLOOR_ABS is not None
+             else _NEFF_FLOOR_FACTOR * nEvents)
+    too_sparse = Neff <= floor
     correction = (
         -nEvents * log_mu
         + nEvents * (3 + nEvents) / (2.0 * Neff)

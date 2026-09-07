@@ -217,7 +217,9 @@ def prepare_redshift_prior_state(
         return None  # per-event counterpart logic needs the live catalog
 
     if model == "dark_sirens_complete":
-        kernels = catalog_kernel_state(cosmo, survey, em_catalog, volume_weighted=True)
+        kernels = catalog_kernel_state(
+            cosmo, survey, em_catalog, apply_galaxy_measure=False
+        )
         row_has = _row_counts(em_catalog) > 0.0
         log_pvol = jnp.log(_precompute_volume_grid(cosmo))
         # Per-pixel normaliser
@@ -259,7 +261,7 @@ def prepare_redshift_prior_state(
                 )
             )
 
-        kernels = catalog_kernel_state(cosmo, survey, em_catalog, log_g_grid=log_g_grid)
+        kernels = catalog_kernel_state(cosmo, survey, em_catalog, log_g_grid=log_g_grid, apply_galaxy_measure=True)
         Nobs = _row_counts(em_catalog)
         log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1e-300)), -jnp.inf)
         # Scalar-compatibility normalisation: curves.dN_miss / N_miss already

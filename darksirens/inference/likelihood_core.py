@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import partial
 
 import jax
@@ -41,6 +42,8 @@ WL_BACKEND_DISABLED = -1
 WL_BACKEND_LOGNORMAL = 0
 WL_BACKEND_TABULATED = 1
 
+# GW detection horizon: P_det(z) = 0 for z > _Z_HORIZON, applied ONLY to the selection integral beta.
+_Z_HORIZON = float(os.getenv("DARK_SIREN_ZHOR", "inf"))
 
 @partial(
     jax.jit,
@@ -151,13 +154,13 @@ def darksiren_log_likelihood(
     pe_model = (
         "spectral_sirens" if universe_model == "spectral_sirens_wl" else universe_model
     )
+    # Models that keep the GW-only (spectral) selection distribution for the selection integral.
     selection_model = (
         "spectral_sirens"
         if universe_model in (
             "bright_sirens",
             "spectral_sirens_wl",
             "dark_sirens",
-            "dark_sirens_complete",
         )
         else universe_model
     )
@@ -263,7 +266,9 @@ def darksiren_log_likelihood(
                 catalog, log_p_pop, _selection_prior,
             )
             supported = dL_in_z_grid(dL, H0, Om0, w0, wa)
-            return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
+            # Detection horizon P_det=0 for z>z_hor.
+            within_horizon = z_of_dL(dL, H0, Om0, w0, wa) <= _Z_HORIZON
+            return jnp.where(supported & within_horizon & jnp.isfinite(ldw), ldw, -jnp.inf)
 
         def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalog):
             """PE weight in the same ``(m1det, q, dL)`` variables as selection."""
