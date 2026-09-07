@@ -308,7 +308,8 @@ def numpy_panel_norm(pair, m1, m_min, dm_min, theta, closed_last=False):
     """INDEPENDENT NumPy reimplementation of the shipped multi-panel rule.
 
     Edges at ``q_cut``, the shoulder and whatever ``_panel_edges`` declares,
-    clipped and sorted; 16 Gauss-Legendre nodes on each interval, except that
+    clipped and sorted; ``PAIRING_PANEL_NQ`` Gauss-Legendre nodes on each
+    interval, except that
     with ``closed_last`` the TOP interval is taken as the closed form
     ``(1 - q**(beta+1))/(beta+1)`` of a bare ``q**beta``.  Written from the
     specification rather than from the jax code, so agreement pins the
@@ -325,7 +326,7 @@ def numpy_panel_norm(pair, m1, m_min, dm_min, theta, closed_last=False):
     cuts = np.sort(np.stack([q_cut, q_a] + extra, axis=-1), axis=-1)
     edges = ([cuts[..., i] for i in range(cuts.shape[-1])]
              + [np.ones_like(q_cut)])
-    glx, glw = np.polynomial.legendre.leggauss(16)
+    glx, glw = np.polynomial.legendre.leggauss(U.PAIRING_PANEL_NQ)
     glt, glwt = 0.5 * (glx + 1.0), 0.5 * glw
     quad = edges[:-1] if not closed_last else edges[:-2]
     out = np.zeros(m1.shape)

@@ -792,7 +792,8 @@ def test_support_edge_cell_is_bounded_and_one_sided(capsys):
             print(f"    grid={ng:5d}:  {hi_e:+.3e} | {lo_e:+.3e}")
     # The edge cell is integrated on the sample's OWN support in both branches,
     # and since the 2-panel Gauss-Legendre rule landed (2026-09-05) it is the
-    # SAME rule on both sides -- the exact branch at 16 nodes per panel, the grid
+    # SAME rule on both sides -- the exact branch at ``PAIRING_PANEL_NQ`` nodes
+    # per panel, the grid
     # branch's edge rule at ``pairing_edge_nq`` -- so the residual here is pure
     # floating point, not a quadrature offset.  It used to be a one-sided
     # -2.513e-3 nats: the old n_q = 200 uniform q-trapezoid scored p(t = 0) = 0 at
