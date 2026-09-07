@@ -70,11 +70,6 @@ from .completion import log_galaxy_measure_grid
 _ZMAX: float = float(np.asarray(zgrid)[-1])
 _HALF_LOG_2PI: float = float(0.5 * np.log(2.0 * np.pi))
 
-#: Numerical floor on sigma_eff [redshift units]; ~30 km/s, well below any
-#: physical photo-z or peculiar-velocity scale.  Protects against
-#: spectroscopic dzgals -> 0 with sigma_kde = 0.
-SIGMA_EFF_FLOOR: float = 1e-4
-
 # Gauss–Legendre nodes/weights on [0, 1] for the kernel normalisation.
 # The default 24 nodes are conservative for broad photo-z kernels; for
 # spectroscopic catalogs (sigma_eff ~ 1e-3, g(z) locally smooth) far fewer
@@ -248,7 +243,31 @@ def configure_catalog_kde_window(size=1024, n_sigma=8.0):
     _KDE_WINDOW_NSIGMA = n_sigma
 
 
-def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
+def max_effective_kernel_width(dzgals, ngals, sigma_kde_max, sigma_eff_floor):
+    """Calculate the largest ``sigma_eff = sqrt(dz^2 + sigma_kde^2)`` over the galaxies."""
+    dz = np.asarray(dzgals, dtype=float)
+    if dz.ndim == 1:
+        dz = dz[None, :]
+    if ngals is None:
+        real = dz > 0.0
+    else:
+        real = np.arange(dz.shape[1]) < np.asarray(ngals).reshape(-1, 1)
+    floor = float(sigma_eff_floor)
+    if not real.any():
+        return max(floor, float(sigma_kde_max))
+    sig = np.sqrt(dz[real] ** 2 + float(sigma_kde_max) ** 2)
+    return float(max(np.nanmax(sig), floor))
+
+
+def kernel_measure_cancels(dzgals, ngals, sigma_kde_max, sigma_eff_floor,
+                           dz_fast_thresh):
+    """Determine if the galaxy measure g(z) cancels out of the complete-catalog prior."""
+    widest = max_effective_kernel_width(dzgals, ngals, sigma_kde_max, sigma_eff_floor)
+    return widest <= float(dz_fast_thresh)
+
+
+def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max,
+                           sigma_eff_floor, n_sigma=6.0):
     """Data-driven window size for :func:`configure_catalog_kde_window`.
 
     Returns the maximum number of galaxies any interval of length
@@ -277,7 +296,7 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
         sig_max = float(
             np.max(np.sqrt(dz[r, :n] ** 2 + float(sigma_kde_max) ** 2))
         )
-        width = 2.0 * float(n_sigma) * max(sig_max, SIGMA_EFF_FLOOR)
+        width = 2.0 * float(n_sigma) * max(sig_max, float(sigma_eff_floor))
         hi = np.searchsorted(zr, zr + width, side="right")
         worst = max(worst, int(np.max(hi - np.arange(n))))
     return worst
@@ -625,8 +644,25 @@ def _row_log_kernel_norms_zspace(zs, sig_eff, real, log_g_grid,
     return jnp.where(real, log_Z, 0.0)
 
 
-def _dispatch_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX):
-    """Route to CDF-domain or z-space GL based on the process-global config."""
+def _row_log_kernel_norms_delta(zs, real, log_g_grid, z_hi=_ZMAX):
+    """Calculate log(g(z_i)).
+
+    Exact as sig_i -> 0, where redshift Gaussians become delta functions.
+    Only contributions below the redshift max are non-trivial.
+
+    Unlike :func:`_row_log_kernel_norms` and its z-space twin, which integrate
+    N(z; z_i, sig_i) g(z) over Gauss-Legendre nodes, the integral collapses to
+    the integrand's value at z_i: one interpolation per row, and no (N_max, K)
+    node tensor.  ``sig_eff`` is not needed at all."""
+    log_g_i = log_interp_zgrid(zs.reshape(-1), log_g_grid).reshape(zs.shape)
+    return jnp.where(real & (zs <= z_hi), log_g_i, jnp.where(real, -jnp.inf, 0.0))
+
+
+def _dispatch_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX,
+                               measure_cancels=False):
+    """Route to the delta limit, CDF-domain, or z-space GL."""
+    if measure_cancels:
+        return _row_log_kernel_norms_delta(zs, real, log_g_grid, z_hi)
     if _GL_DOMAIN == 'zspace':
         return _row_log_kernel_norms_zspace(
             zs, sig_eff, real, log_g_grid, z_hi, _GL_NSIGMA)
@@ -634,7 +670,8 @@ def _dispatch_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX):
 
 
 def _renorm_log_kw_below_depth(
-    log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies
+    log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies,
+    measure_cancels=False
 ):
     """Renormalise per-galaxy kernel weights so the depth-truncated catalog
     prior ``p_cat(z | pix)`` stays a proper density.
@@ -667,7 +704,7 @@ def _renorm_log_kw_below_depth(
     ``dN_miss = dN_exp`` (the stated intent: hosts beyond the depth are
     *missing*, not nonexistent).
     """
-    log_Z_depth = _dispatch_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=z_depth)
+    log_Z_depth = _dispatch_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=z_depth, measure_cancels=measure_cancels)
     log_m = jnp.where(
         has_galaxies, _logsumexp_neginf_safe(log_kw + log_Z_depth), 0.0
     )
@@ -675,7 +712,8 @@ def _renorm_log_kw_below_depth(
 
 
 def _row_kernel_state(
-    zs, dzs, ws, ngal, sigma_kde, log_g_grid, volume_weighted=False, z_depth=None
+    zs, dzs, ws, ngal, sigma_kde, sigma_eff_floor, log_g_grid,
+    volume_weighted=False, z_depth=None, measure_cancels=False
 ):
     """
     Per-galaxy kernel quantities for one row, under one of two host-weight
@@ -698,7 +736,7 @@ def _row_kernel_state(
     depth truncation applies.
     """
     real = _row_real_mask(zs, ws, ngal)
-    sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
+    sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), sigma_eff_floor)
     # The 1e-300 floor is a numerical BACKSTOP only (it keeps padding slots from
     # producing log(0) = -inf * 0 = NaN inside the traced reduction).  A real
     # galaxy with w <= 0 is a data error, not something to floor: it would carry
@@ -715,7 +753,7 @@ def _row_kernel_state(
     has_galaxies = jnp.isfinite(lse)
     log_w_norm = jnp.where(real, log_w - jnp.where(has_galaxies, lse, 0.0), -jnp.inf)
 
-    if volume_weighted:
+    if volume_weighted or measure_cancels:
         log_kw = log_w_norm
     else:
         log_Z = _dispatch_log_kernel_norms(zs, sig_eff, real, log_g_grid)
@@ -729,7 +767,8 @@ def _row_kernel_state(
         # :func:`_renorm_log_kw_below_depth`).
         if z_depth is not None:
             log_kw, log_depth_mass = _renorm_log_kw_below_depth(
-                log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies
+                log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies,
+                measure_cancels
             )
     return log_kw, sig_eff, log_depth_mass
 
@@ -741,6 +780,9 @@ class CatalogKernelState(NamedTuple):
     sig_eff: jnp.ndarray     # (N_rows, N_max)
     log_sig_eff: jnp.ndarray = None  # (N_rows, N_max) — precomputed log(sig_eff)
     volume_weighted: bool = False
+    #: g(z) was never divided out of ``log_kw`` because it cancels at this
+    #: catalog's kernel widths, so the evaluator must not reapply it either.
+    measure_cancels: bool = False
     #: (N_rows,) log of the mixture mass that lay below ``z_depth`` BEFORE the
     #: shape was renormalised.  Callers scale the row's observed galaxy count by
     #: it so the depth-truncated catalog branch integrates to the number of
@@ -904,14 +946,16 @@ def _pinned_kernel_state(cosmo, survey, em_catalog, pinned, log_g_grid, z_depth)
     if ngals is not None:
         probe_kw, _, _ = _map_rows(
             lambda zs, dzs, ws, ng: _row_kernel_state(
-                zs, dzs, ws, ng, survey.sigma_kde, log_g_grid, False, z_depth),
+                zs, dzs, ws, ng, survey.sigma_kde, survey.sigma_eff_floor,
+                log_g_grid, False, z_depth),
             (em_catalog.zgals[pr], em_catalog.dzgals[pr],
              em_catalog.wgals[pr], ngals[pr]),
         )
     else:
         probe_kw, _, _ = _map_rows(
             lambda zs, dzs, ws: _row_kernel_state(
-                zs, dzs, ws, None, survey.sigma_kde, log_g_grid, False, z_depth),
+                zs, dzs, ws, None, survey.sigma_kde, survey.sigma_eff_floor,
+                log_g_grid, False, z_depth),
             (em_catalog.zgals[pr], em_catalog.dzgals[pr], em_catalog.wgals[pr]),
         )
     ref_kw = pinned.log_kw[pr]
@@ -963,6 +1007,7 @@ def catalog_kernel_state(
     volume_weighted: bool = False,
     z_depth=None,
     pinned: "PinnedKernelQuadrature | None" = None,
+    measure_cancels: bool = False,
 ) -> CatalogKernelState:
     """Precompute per-galaxy kernel quantities once per parameter proposal.
 
@@ -988,16 +1033,16 @@ def catalog_kernel_state(
     if ngals is not None:
         log_kw, sig_eff, log_depth_mass = _map_rows(
             lambda zs, dzs, ws, ng: _row_kernel_state(
-                zs, dzs, ws, ng, survey.sigma_kde, log_g_grid, volume_weighted,
-                z_depth,
+                zs, dzs, ws, ng, survey.sigma_kde, survey.sigma_eff_floor,
+                log_g_grid, volume_weighted, z_depth, measure_cancels,
             ),
             (zgals, dzgals, wgals, ngals),
         )
     else:
         log_kw, sig_eff, log_depth_mass = _map_rows(
             lambda zs, dzs, ws: _row_kernel_state(
-                zs, dzs, ws, None, survey.sigma_kde, log_g_grid, volume_weighted,
-                z_depth,
+                zs, dzs, ws, None, survey.sigma_kde, survey.sigma_eff_floor,
+                log_g_grid, volume_weighted, z_depth, measure_cancels,
             ),
             (zgals, dzgals, wgals),
         )
@@ -1007,7 +1052,9 @@ def catalog_kernel_state(
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
         log_sig_eff=jnp.log(sig_eff),
-        volume_weighted=volume_weighted, z_depth=z_depth,
+        volume_weighted=volume_weighted, 
+        measure_cancels=measure_cancels,
+        z_depth=z_depth,
         log_depth_mass=log_depth_mass,
         sig_eff_row_max=jnp.max(sig_eff, axis=1),
         rows_sorted=_resolve_rows_sorted_guard(zgals, ngals),
@@ -1066,7 +1113,8 @@ def build_pinned_kernel_quadrature(
 # ------------------------------------------------------------
 
 def _row_marked_kernel_state(
-    zs, dzs, ws, log_h_row, ngal, sigma_kde, log_g_grid, z_depth=None
+    zs, dzs, ws, log_h_row, ngal, sigma_kde, sigma_eff_floor, log_g_grid,
+    z_depth=None, measure_cancels=False
 ):
     """Per-galaxy kernel quantities for one row using host-efficiency weights.
 
@@ -1077,7 +1125,7 @@ def _row_marked_kernel_state(
     and unit weights this reduces to :func:`_row_kernel_state`.
     """
     real = _row_real_mask(zs, ws, ngal)
-    sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
+    sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), sigma_eff_floor)
 
     # 1e-300: numerical backstop for padding slots only; real galaxies with
     # w <= 0 are rejected by ``darksirens_pixelate`` (see _row_kernel_state).
@@ -1087,7 +1135,8 @@ def _row_marked_kernel_state(
     has_galaxies = jnp.isfinite(lse)
     log_wh_norm = jnp.where(real, log_wh - jnp.where(has_galaxies, lse, 0.0), -jnp.inf)
 
-    log_Z = _dispatch_log_kernel_norms(zs, sig_eff, real, log_g_grid)
+    log_Z = _dispatch_log_kernel_norms(zs, sig_eff, real, log_g_grid,
+                                       measure_cancels=measure_cancels)
     log_kw = jnp.where(real, log_wh_norm - log_Z, -jnp.inf)
     # Depth renormalisation mirrors the unmarked twin: the marked mixture SHAPE
     # is renormalised to unit mass on [0, z_depth] and the below-depth mass is
@@ -1098,7 +1147,8 @@ def _row_marked_kernel_state(
     log_depth_mass = jnp.zeros((), dtype=sig_eff.dtype)
     if z_depth is not None:
         log_kw, log_depth_mass = _renorm_log_kw_below_depth(
-            log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies
+            log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies,
+            measure_cancels
         )
     # AMPLITUDE CONVENTION (redshift/prior.py's module docstring): the
     # catalog:missing odds are COUNT odds, so the marked amplitude is the
@@ -1149,14 +1199,16 @@ def marked_catalog_kernel_state(
     if ngals is not None:
         log_kw, sig_eff, log_N_host, log_depth_mass = _map_rows(
             lambda zs, dzs, ws, lh, ng: _row_marked_kernel_state(
-                zs, dzs, ws, lh, ng, survey.sigma_kde, log_g_grid, z_depth
+                zs, dzs, ws, lh, ng, survey.sigma_kde, survey.sigma_eff_floor,
+                log_g_grid, z_depth
             ),
             (zgals, dzgals, wgals, log_h, ngals),
         )
     else:
         log_kw, sig_eff, log_N_host, log_depth_mass = _map_rows(
             lambda zs, dzs, ws, lh: _row_marked_kernel_state(
-                zs, dzs, ws, lh, None, survey.sigma_kde, log_g_grid, z_depth
+                zs, dzs, ws, lh, None, survey.sigma_kde, survey.sigma_eff_floor,
+                log_g_grid, z_depth
             ),
             (zgals, dzgals, wgals, log_h),
         )
@@ -1268,10 +1320,9 @@ def eval_log_catalog_prior_state(
         log_mix = jnp.where(
             state.row_empty[jnp.asarray(pix, dtype=jnp.int32)], -jnp.inf, log_mix
         )
-    # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
-    # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
-    # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.
-    log_g_front = jnp.where(state.volume_weighted, 0.0,
+    # Volume-weighted kernels already carry g(z_i) in their weights, and
+    # measure_cancels kernels never had it divided out, so neither takes a front g(z)
+    log_g_front = jnp.where(state.volume_weighted | state.measure_cancels, 0.0,
                             log_interp_zgrid(z, state.log_g_grid))
     log_p_cat = log_g_front + log_mix
     # Depth truncation: a magnitude-limited survey catalogs nothing past
@@ -1318,7 +1369,8 @@ def _log_catalog_prior_impl(
     # hosts per redshift shell, so volume-weighted (True) kernels would
     # double-count dV_c/dz for any catalog whose dN/dz follows the volume.
     log_kw, sig_eff, _log_depth_mass = _row_kernel_state(
-        zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid, False
+        zs, dzs, ws, ngal, survey.sigma_kde, survey.sigma_eff_floor,
+        log_g_grid, False
     )
     log_g_z = log_interp_zgrid(z, log_g_grid)
     return log_g_z + _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig_eff))

@@ -209,6 +209,9 @@ def make_pop_extractor(settings: dict):
         # Default True reproduces pre-gate archived runs, which sampled b_miss
         # regardless of the flag (see issue #288).
         use_lss                = bool(settings.get("use_LSS", True)),
+        # Same mirror for the g(z)-cancellation verdict: a run that dropped
+        # delta must not have it reinstated here.
+        measure_cancels        = bool(settings.get("measure_cancels", False)),
         mark_names_by_catalog  = (
             tuple(tuple(n) for n in settings["mark_names_by_catalog"])
             if settings.get("mark_names_by_catalog") else None

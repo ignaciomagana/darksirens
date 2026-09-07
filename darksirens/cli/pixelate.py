@@ -145,8 +145,9 @@ def main(argv=None):
     # becomes a catalog member with a nonsense distance modulus and a negative
     # comoving volume in the catalog KDE; a NaN z only surfaces much later, as
     # ``sort_survey_rows_by_z``'s AssertionError inside a different tool; a
-    # non-positive dz is rescued only by chance, via SIGMA_EFF_FLOOR.  Also
-    # reject z >= 100, the padding sentinel this tool writes below.
+    # non-positive dz is rescued only by chance, via the kernel's sigma_eff
+    # floor (--sigma_eff_floor).  Also reject z >= 100, the padding sentinel this 
+    # tool writes below.
     bad_z = ~(np.isfinite(zs) & (zs > 0.0) & (zs < 100.0))
     if bad_z.any():
         n_bad = int(bad_z.sum())
@@ -167,8 +168,8 @@ def main(argv=None):
             f"{n_bad:,} bad value(s) out of {len(ddzs):,} (first offending "
             f"index {int(np.argmax(bad_dz))}, value {ddzs[bad_dz][0]!r}). A "
             "negative or NaN photo-z width is only rescued by chance, by the "
-            "kernel's SIGMA_EFF_FLOOR. Drop or fix those rows in the input "
-            "catalog."
+            "kernel's sigma_eff floor (--sigma_eff_floor). Drop or fix those "
+            "rows in the input catalog."
         )
     bad_w = ~(np.isfinite(wts) & (wts > 0.0))
     if bad_w.any():

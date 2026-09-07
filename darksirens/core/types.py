@@ -105,8 +105,11 @@ class SurveyParams(NamedTuple):
     ``alpha_miss`` enters only through the exact product
     ``alpha_miss * b_miss`` (perfect degeneracy) and defaults to 1 so that
     ``b_miss`` alone carries the modulation.  ``sigma_kde`` broadens the
-    catalog redshift kernels in quadrature (an effective floor of 1e-4 in
-    redshift, ~30 km/s, protects spectroscopic entries numerically).
+    catalog redshift kernels in quadrature, floored at ``sigma_eff_floor``.
+
+    ``sigma_eff_floor`` is the numerical floor on ``sigma_eff = sqrt(dzgals^2 + sigma_kde^2)`` [redshift units], 
+    set by ``--sigma_eff_floor``.  It exists only to keep the Gaussian kernels and
+    their quadrature from degenerating as ``dzgals -> 0`` with ``sigma_kde = 0``.
 
     ``complete_empty_pixel_policy`` controls how the formally complete-catalog
     prior treats catalog rows with zero real galaxies: ``0`` is the strict
@@ -225,6 +228,7 @@ class SurveyParams(NamedTuple):
     # sampled or traced; inert on the Q_LSS / latent paths (Q carries its own
     # mean-one renormalization).  See :class:`LegacyLSSFloor`.
     lss_floor: Any = None
+    sigma_eff_floor: Any = 1e-4
 
 
 class EMCatalog(NamedTuple):

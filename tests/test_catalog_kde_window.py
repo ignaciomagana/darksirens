@@ -209,7 +209,8 @@ def test_windowed_matches_full_row_across_sigma_kde_prior():
     zsamp, pixs = _samples(rng, zg, ng)
     # W scaled to the mock the same way the 1024 default is scaled to a
     # 2113-galaxy row: sized by the data-driven rule at the prior's top.
-    W = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05)
+    W = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05,
+                               sigma_eff_floor=1e-4)
     assert W < int(ng[0])  # windowing is actually exercised
     for sk in SIGMA_KDE_PRIOR:
         full = _eval_all(emc, sk, zsamp, pixs, window=None)
@@ -224,7 +225,8 @@ def test_windowed_matches_full_row_marked_state():
     emc = _em(zg, dz, wg, ng)
     log_h = jnp.asarray(rng.normal(0.0, 0.5, zg.shape))
     zsamp, pixs = _samples(rng, zg, ng, n_samp=400)
-    W = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05)
+    W = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05,
+                               sigma_eff_floor=1e-4)
 
     def _eval_marked(sk, window):
         if window is None:
@@ -253,7 +255,8 @@ def test_volume_weighted_state_windowed_parity():
     zg, dz, wg, ng, _ = sort_survey_rows_by_z(zg, dz, wg, ng)
     emc = _em(zg, dz, wg, ng)
     zsamp, pixs = _samples(rng, zg, ng, n_samp=400)
-    W = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05)
+    W = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05,
+                               sigma_eff_floor=1e-4)
     for sk in (0.0, 0.05):
         full = _eval_all(emc, sk, zsamp, pixs, None, volume_weighted=True)
         win = _eval_all(emc, sk, zsamp, pixs, W, volume_weighted=True)
@@ -317,7 +320,8 @@ def test_windowed_gradient_matches_full_row():
     zg, dz, wg, ng, _ = sort_survey_rows_by_z(zg, dz, wg, ng)
     emc = _em(zg, dz, wg, ng)
     zsamp, pixs = _samples(rng, zg, ng, n_samp=256)
-    W = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05)
+    W = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05,
+                               sigma_eff_floor=1e-4)
 
     def total(sk, window):
         if window is None:
@@ -382,8 +386,10 @@ def test_recommended_kde_window_bounds_block_counts():
     rng = np.random.default_rng(287)
     zg, dz, wg, ng = _raw_mock(rng, n_gal=300, n_max=330)
     zg, dz, wg, ng, _ = sort_survey_rows_by_z(zg, dz, wg, ng)
-    w_narrow = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.005)
-    w_wide = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05)
+    w_narrow = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.005,
+                                      sigma_eff_floor=1e-4)
+    w_wide = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05,
+                                    sigma_eff_floor=1e-4)
     assert 0 < w_narrow <= w_wide <= int(np.max(ng))
     # brute force on the dense row: every +/- 6 sigma_max block must fit
     n = int(ng[0])

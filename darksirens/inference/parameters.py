@@ -134,7 +134,7 @@ def _as_per_catalog_strata(raw, n_catalogs, where):
 
 
 def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
-                   wl_params, c_mode=None, k_corr_coeffs=None,
+                   wl_params, sigma_eff_floor, c_mode=None, k_corr_coeffs=None,
                    selection_strata=None, selection_family=None,
                    lss_floor=None):
     """Build one catalog's :class:`SurveyParams` from a resolved label dict.
@@ -168,6 +168,8 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
     if suffix and f"M_faint_offset{suffix}" not in values \
             and "M_faint_offset" in values:
         field["M_faint_offset"] = values["M_faint_offset"]
+    if sigma_eff_floor is None:
+        raise ValueError("sigma_eff_floor was not specified.")
     return SurveyParams(
         n0=10.0 ** field["log10n0"],
         z50=field["z50"],
@@ -176,6 +178,7 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
         b_miss=field["b_miss"],
         alpha_miss=field["alpha_miss"],
         sigma_kde=field["sigma_kde"],
+        sigma_eff_floor=sigma_eff_floor,
         complete_empty_pixel_policy=complete_empty_pixel_policy,
         z_depth=z_depth,
         wl_params=wl_params,
@@ -236,6 +239,8 @@ class ParameterDecoder:
     # catalog gets ``z_depth=None`` -- the legacy full-grid missing-galaxy
     # budget, bit-identical to the pre-existing behaviour.
     z_depths: tuple[float | None, ...] = ()
+    # Numerical floor on sigma_eff = sqrt(dzgals^2 + sigma_kde^2), from --sigma_eff_floor.
+    sigma_eff_floor: float | None = 1e-4
     # Completeness estimator mode (int enum from C_MODES: 0=per_pixel legacy
     # default, 1=aggregate), decoded eagerly from the CLI string.  Stored on
     # every catalog's SurveyParams with per_pixel normalised to None and
@@ -350,6 +355,7 @@ class ParameterDecoder:
             complete_empty_pixel_policy=self.complete_empty_pixel_policy,
             z_depth=self.z_depths[0] if len(self.z_depths) >= 1 else None,
             wl_params=self.wl_params,
+            sigma_eff_floor=self.sigma_eff_floor,
             c_mode=self.c_mode,
             k_corr_coeffs=_kc1,
             selection_strata=_st1,
@@ -395,6 +401,7 @@ class ParameterDecoder:
                 complete_empty_pixel_policy=self.complete_empty_pixel_policy,
                 z_depth=self.z_depths[k - 1] if len(self.z_depths) >= k else None,
                 wl_params=None,
+                sigma_eff_floor=self.sigma_eff_floor,
                 c_mode=self.c_mode,
                 k_corr_coeffs=_kc,
                 selection_strata=_st,
@@ -545,6 +552,10 @@ def build_parameter_decoder(
         # CLI opts always carry use_LSS explicitly; the fallback mirrors the
         # build_parameter_space signature default for direct/legacy callers.
         use_lss=bool(getattr(opts, "use_LSS", True)),
+        # delta is dropped from the sampled block when g(z) cancels out of the
+        # complete-catalog prior, so the decoder must re-derive the space under
+        # the SAME verdict or the label sets diverge (as for use_lss above).
+        measure_cancels=bool(getattr(opts, "measure_cancels", False)),
         # b_miss IS b_GW in latent mode and is genuinely identified there, so
         # the decoder must re-derive the space under the SAME mode the
         # likelihood runs in or the label sets diverge (PLAN 4.3).
@@ -601,6 +612,9 @@ def build_parameter_decoder(
         # that never set it) -> empty tuple -> every catalog's z_depth is None
         # (the legacy full-grid missing-galaxy budget).
         z_depths=tuple(getattr(opts, "resolved_survey_z_depths", None) or ()),
+        # Entry-point default: bare/legacy opts that never set the flag get the
+        # 1e-4 (~30 km/s) floor the kernels have always carried.
+        sigma_eff_floor=float(getattr(opts, "sigma_eff_floor", None) or 1e-4),
         sky_labels=tuple(sky_labels),
         sky_params_fid=tuple(float(v) for v in get_fixed_sky_params(sky_model)),
         mark_labels=tuple(mark_labels),

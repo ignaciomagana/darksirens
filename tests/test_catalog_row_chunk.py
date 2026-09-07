@@ -46,7 +46,7 @@ def _log_g_grid():
     return jnp.log(1.0 + jnp.asarray(zgrid) ** 2)
 
 
-_SURVEY = SimpleNamespace(sigma_kde=1e-3)
+_SURVEY = SimpleNamespace(sigma_kde=1e-3, sigma_eff_floor=1e-4)
 
 
 @pytest.mark.parametrize("with_ngals", [True, False])
@@ -127,7 +127,7 @@ def test_kernel_quadrature_gl8_accuracy_across_sigma_kde():
     log_g = _volumetric_log_g_grid()
     for sigma_kde in (0.0, 0.02, 0.05):
         em = _toy_catalog(rng, n_rows=25, n_max=9)
-        survey = SimpleNamespace(sigma_kde=sigma_kde)
+        survey = SimpleNamespace(sigma_kde=sigma_kde, sigma_eff_floor=1e-4)
         try:
             configure_kernel_quadrature(24)
             ref = catalog_kernel_state(None, survey, em, log_g_grid=log_g)

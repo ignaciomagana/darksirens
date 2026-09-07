@@ -279,6 +279,7 @@ def prepare_redshift_prior_state(
     *,
     materialize_state: bool = True,
     catalog_sky_weighting: str = "conditional",
+    measure_cancels: bool = False,
 ):
     """Build the per-proposal state for ``model``.  O(N_rows × N_grid).
 
@@ -349,7 +350,9 @@ def prepare_redshift_prior_state(
         # Measured on a uniform-in-V_c null catalog, p_cat/(dV/dz) has
         # log-log slope +0.94 with volume weighting and 0.00 without (see
         # tests/test_complete_catalog_volume_convention.py).
-        kernels = catalog_kernel_state(cosmo, survey, em_catalog, volume_weighted=False)
+        kernels = catalog_kernel_state(cosmo, survey, em_catalog,
+                                       volume_weighted=False,
+                                       measure_cancels=measure_cancels)
         Nobs = _row_counts(em_catalog)
         row_has = Nobs > 0.0
         vol = _precompute_volume_grid(cosmo)

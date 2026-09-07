@@ -2145,10 +2145,7 @@ def _field_depth_weighted_mass(
     ``(N_gal, N_nodes)`` quadrature intermediate never materialises whole.
     """
     # Deferred import: catalog.py imports log_galaxy_measure_grid from this module.
-    from darksirens.redshift.catalog import (
-        SIGMA_EFF_FLOOR,
-        _dispatch_log_kernel_norms,
-    )
+    from darksirens.redshift.catalog import _dispatch_log_kernel_norms
 
     z_flat = em_catalog.field_depth_z
     dz_flat = em_catalog.field_depth_dz
@@ -2189,7 +2186,7 @@ def _field_depth_weighted_mass(
     def _body(acc, xs):
         z_c, dz_c, w_c, val_c = xs
         sig = jnp.maximum(
-            jnp.sqrt(dz_c ** 2 + survey.sigma_kde ** 2), SIGMA_EFF_FLOOR
+            jnp.sqrt(dz_c ** 2 + survey.sigma_kde ** 2), survey.sigma_eff_floor
         )
         log_Z_full = _dispatch_log_kernel_norms(z_c, sig, val_c, log_g_grid)
         log_Z_depth = _dispatch_log_kernel_norms(
@@ -2245,12 +2242,13 @@ def _field_depth_probe_ratio(cosmo, survey, em_catalog, idx):
     expression for expression, so the probe measures the pinned quantity and not
     a paraphrase of it.
     """
-    from darksirens.redshift.catalog import SIGMA_EFF_FLOOR, _row_log_kernel_norms
+    from darksirens.redshift.catalog import _row_log_kernel_norms
 
     z_p = jnp.asarray(em_catalog.field_depth_z, dtype=zgrid.dtype)[idx]
     dz_p = jnp.asarray(em_catalog.field_depth_dz, dtype=zgrid.dtype)[idx]
     log_g_grid = log_galaxy_measure_grid(cosmo, survey)
-    sig = jnp.maximum(jnp.sqrt(dz_p ** 2 + survey.sigma_kde ** 2), SIGMA_EFF_FLOOR)
+    sig = jnp.maximum(jnp.sqrt(dz_p ** 2 + survey.sigma_kde ** 2),
+                      survey.sigma_eff_floor)
     real = jnp.ones_like(z_p, dtype=bool)
     log_Z_full = _row_log_kernel_norms(z_p, sig, real, log_g_grid)
     log_Z_depth = _row_log_kernel_norms(

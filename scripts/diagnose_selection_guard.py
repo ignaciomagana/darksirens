@@ -179,7 +179,8 @@ def main(argv=None):
     captured = {}
 
     def _capture_run_sampler(method, likelihood, prior_transform, labels,
-                             lower_bound, upper_bound, opts, prior_kinds=None):
+                             lower_bound, upper_bound, opts, prior_kinds=None,
+                             **_ignored):
         captured.update(
             likelihood=likelihood,
             prior_transform=prior_transform,
