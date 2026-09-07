@@ -1212,8 +1212,18 @@ def _make_mixture_likelihood(
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
     selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
     max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
-    z_horizon_opt = getattr(opts, "z_horizon", None)
-    z_horizon = float("inf") if z_horizon_opt is None else float(z_horizon_opt)
+    measure_cancels = bool(getattr(opts, "measure_cancels", False))
+    log_mu_table_fn = getattr(opts, "log_mu_table_fn", None)
+    host_draws = getattr(opts, "host_draws", None) or {}
+    if (getattr(opts, "mc_source", "gw_samples") == "galaxy_redshift_samples"
+            and not host_draws):
+        raise ValueError(
+            "--mc_source galaxy_redshift_samples was requested but no host "
+            "draws reached the likelihood factory; the run would have silently "
+            "used the GW-sample estimator instead."
+        )
+    pop_z_horizon_opt = getattr(opts, "pop_z_horizon", None)
+    pop_z_horizon = float("inf") if pop_z_horizon_opt is None else float(pop_z_horizon_opt)
     catalog_sky_weighting = getattr(opts, "catalog_sky_weighting", "conditional")
 
     def _check_bundle_marks(names_k, marks_k, ngals_k, field_k, *, where):
@@ -1654,7 +1664,12 @@ def _make_mixture_likelihood(
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
             max_likelihood_variance=max_likelihood_variance,
-            z_horizon=z_horizon,
+            pop_z_horizon=pop_z_horizon,
+            measure_cancels=measure_cancels,
+            log_mu_table_fn=log_mu_table_fn,
+            host_z=host_draws.get("host_z"),
+            host_log_w=host_draws.get("host_log_w"),
+            host_kde_bandwidth=float(getattr(opts, "host_kde_bandwidth", 0.15)),
             lss_marginalize=bool(getattr(opts, "lss_marginalize", False)),
             n_catalogs=n_catalogs,
             mixture_surveys=mixture_surveys,
@@ -1704,8 +1719,19 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
     selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
     max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
-    z_horizon_opt = getattr(opts, "z_horizon", None)
-    z_horizon = float("inf") if z_horizon_opt is None else float(z_horizon_opt)
+    measure_cancels = bool(getattr(opts, "measure_cancels", False))
+    log_mu_table_fn = getattr(opts, "log_mu_table_fn", None)
+    # Host-sum draws, built once at load time; empty dict = sampled PE path.
+    host_draws = getattr(opts, "host_draws", None) or {}
+    if (getattr(opts, "mc_source", "gw_samples") == "galaxy_redshift_samples"
+            and not host_draws):
+        raise ValueError(
+            "--mc_source galaxy_redshift_samples was requested but no host "
+            "draws reached the likelihood factory; the run would have silently "
+            "used the GW-sample estimator instead."
+        )
+    pop_z_horizon_opt = getattr(opts, "pop_z_horizon", None)
+    pop_z_horizon = float("inf") if pop_z_horizon_opt is None else float(pop_z_horizon_opt)
     catalog_sky_weighting = getattr(opts, "catalog_sky_weighting", "conditional")
 
     # Weak-lensing magnification backend (resolved up front, before the heavy
@@ -2264,7 +2290,12 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 materialize_redshift_prior_state=materialize_redshift_prior_state,
                 selection_neff_soft_guard=selection_neff_soft_guard,
                 max_likelihood_variance=max_likelihood_variance,
-                z_horizon=z_horizon,
+                pop_z_horizon=pop_z_horizon,
+                measure_cancels=measure_cancels,
+                log_mu_table_fn=log_mu_table_fn,
+                host_z=host_draws.get("host_z"),
+                host_log_w=host_draws.get("host_log_w"),
+                host_kde_bandwidth=float(getattr(opts, "host_kde_bandwidth", 0.15)),
                 catalog_sky_weighting=catalog_sky_weighting,
                 share_prior_state_by_catalog=share_prior_state_by_catalog,
             )
@@ -2303,7 +2334,12 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
             max_likelihood_variance=max_likelihood_variance,
-            z_horizon=z_horizon,
+            pop_z_horizon=pop_z_horizon,
+            measure_cancels=measure_cancels,
+            log_mu_table_fn=log_mu_table_fn,
+            host_z=host_draws.get("host_z"),
+            host_log_w=host_draws.get("host_log_w"),
+            host_kde_bandwidth=float(getattr(opts, "host_kde_bandwidth", 0.15)),
             catalog_sky_weighting=catalog_sky_weighting,
             share_prior_state_by_catalog=share_prior_state_by_catalog,
         )

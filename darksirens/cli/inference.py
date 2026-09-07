@@ -575,6 +575,7 @@ def run_completion_validation(
         b_miss=survey_values["b_miss"],
         alpha_miss=survey_values["alpha_miss"],
         sigma_kde=survey_values["sigma_kde"],
+        sigma_eff_floor=float(getattr(opts, "sigma_eff_floor", None) or 1e-4),
         **_mode_kwargs,
     )
     lss_kwargs, lss_attached, lss_attached_by_key = _completion_validation_lss_tables(
@@ -1401,10 +1402,27 @@ def build_parser():
               "exceeding it are guarded (hard -inf or the soft wall per "
               "--selection_neff_guard). The Vitale 5 N_obs mean floor always applies."))
     g.add_argument(
-        "--z_horizon", type=float, default=None, metavar="Z",
-        help=("GW detection horizon: P_det(z) = 0 for z > Z, applied ONLY to the "
-              "selection integral (never the per-event PE numerator). Must be > 0. "
-              "Default is infinity."))
+        "--beta_table", type=str, default=None, metavar="PATH",
+        help=("Take log mu from a tabulated selection integral (built by "
+              "scripts/build_beta_table.py) instead of summing over the injections."))
+    g.add_argument(
+        "--mc_source", choices=("gw_samples", "galaxy_redshift_samples"),
+        default="gw_samples",
+        help=("Distribution that the per-event redshift integral is sampled from."))
+    g.add_argument(
+        "--n_mc_samples", type=int, default=None, metavar="N",
+        help=("Monte-Carlo samples per event. Under 'galaxy_redshift_samples' "
+              "this is how many galaxy redshifts are drawn (default 4000); "
+              "under 'gw_samples' it subsamples the stored PE posterior "
+              "(default: use all of them)."))
+    g.add_argument(
+        "--host_kde_bandwidth", type=float, default=0.15, metavar="F",
+        help=("PE-likelihood KDE bandwidth as a fraction of the posterior width."))
+    g.add_argument(
+        "--pop_z_horizon", type=float, default=None, metavar="Z",
+        help=("A redshift horizon on the population prior such that for z > Z, "
+              "there is no probability mass throughout the likelihood and "
+              "selection evaluation."))
     g.add_argument("--prior_overrides", default=None, metavar="JSON")
     g.add_argument("--fixed_parameter_values", default=None, metavar="JSON")
     g.add_argument("--counterpart", nargs="+", metavar="RA_DEC_Z",
@@ -1827,6 +1845,13 @@ def build_parser():
                         "sigma_eff (zspace domain only; module default 5.0). The dominant "
                         "accuracy knob: 4 pins a -8e-5 truncation bias no node count can "
                         "remove; 6 needs >= 24 nodes. Use >= 5.")
+    g.add_argument("--dz_fast_thresh", type=float, default=1e-4, metavar="SIGMA",
+                   help="Kernel width below which the galaxy measure "
+                        "g(z) = dV_c/dz (1+z)^delta is taken to cancel out of the "
+                        "complete-catalog prior.")
+    g.add_argument("--sigma_eff_floor", type=float, default=1e-4, metavar="SIGMA",
+                   help="Numerical floor on the catalog kernel width "
+                        "sigma_eff = sqrt(dzgals^2 + sigma_kde^2) [redshift units].")
     g.add_argument("--kde_window", type=int, default=None, metavar="W",
                    help="Static window size for the per-sample catalog KDE: only the W "
                         "galaxies nearest each sample's redshift are evaluated (rows are "
@@ -2594,6 +2619,168 @@ def _canonicalize_fixed_flags(opts):
         opts.fixed_de = False
 
 
+def _resolve_beta_table(opts, pspace):
+    """Load, validate and report ``--beta_table``, stashing the interpolator on opts."""
+    opts.log_mu_table_fn = None
+    path = getattr(opts, "beta_table", None)
+    if not path:
+        return
+    from darksirens.likelihood.beta_interp import (
+        beta_table_covers_prior, check_axes_cover_sampled, load_beta_table,
+        make_likelihood_log_mu_fn,
+    )
+    try:
+        table = load_beta_table(path)
+        check_axes_cover_sampled(table.labels, list(pspace.labels))
+    except (OSError, ValueError) as exc:
+        _fatal(f"--beta_table {path}: {exc}")
+    lower = dict(zip(pspace.labels, [float(x) for x in pspace.lower_bound]))
+    upper = dict(zip(pspace.labels, [float(x) for x in pspace.upper_bound]))
+    escapes = beta_table_covers_prior(table, lower, upper)
+    if escapes:
+        _fatal("--beta_table does not span the prior:\n  " + "\n  ".join(escapes))
+    opts.log_mu_table_fn = make_likelihood_log_mu_fn(table)
+    print(f"  [i] beta table: {path}")
+    print(f"      axes {list(table.labels)}; nodes "
+          f"{[int(n.size) for n in table.nodes]}")
+    print(f"      selection error budget sigma(log mu) = {table.sigma_log_mu:.6f} nats "
+          f"(per-node MC {float(table.log_mu_err.max()):.6f}, "
+          f"interpolation {table.interp_err:.6f})")
+    print("      the per-draw Neff guard is inactive on this path: a table has no "
+          "per-draw MC weights, so its error is the budget above.")
+
+
+def _cosmo_bounds_from_pspace(pspace, fixed_parameter_values):
+    """(lo, hi) per cosmological parameter over the SAMPLED range.
+
+    A fixed parameter returns lo == hi, so it costs no extra window corner.
+    """
+    defaults = {"H0": 67.74, "Om0": 0.3075, "w0": -1.0, "wa": 0.0}
+    labels = list(getattr(pspace, "labels", ()) or ())
+    lo_all = list(getattr(pspace, "lower_bound", ()) or ())
+    hi_all = list(getattr(pspace, "upper_bound", ()) or ())
+    out = {}
+    for k, dflt in defaults.items():
+        if k in labels:
+            i = labels.index(k)
+            out[k] = (float(lo_all[i]), float(hi_all[i]))
+        else:
+            v = float((fixed_parameter_values or {}).get(k, dflt))
+            out[k] = (v, v)
+    return out
+
+
+def _resolve_host_draws(opts, data, pspace, fixed_parameter_values):
+    """Build the galaxy-redshift draws, stashing them on opts.
+
+    Off unless ``--mc_source galaxy_redshift_samples``.  The draws are made
+    ONCE here and reused at every likelihood call: redrawing per proposal would
+    put fresh Monte-Carlo noise on every point in parameter space and reproduce
+    the roughness this estimator exists to remove.
+    """
+    opts.host_draws = {}
+    if getattr(opts, "mc_source", "gw_samples") != "galaxy_redshift_samples":
+        return
+
+    import jax.numpy as jnp
+
+    from darksirens.likelihood.host_items import build_host_draws
+
+    zgals = data.get("zgals_pe")
+    s2u = data.get("sample_to_unique_pe")
+    if zgals is None or s2u is None:
+        _fatal("--mc_source galaxy_redshift_samples needs a per-pixel galaxy "
+               "catalog (zgals_pe / sample_to_unique_pe); none was loaded.")
+
+    gw = data["gw_pe"] if "gw_pe" in data else data
+    nEvents = int(data["nEvents"])
+    nsamp = int(data["nsamp"])
+    dL = np.asarray(gw["dL"]).reshape(nEvents, nsamp)
+
+    n_draw = int(getattr(opts, "n_mc_samples", None) or 4000)
+    zmax = getattr(opts, "pop_z_horizon", None)
+    bounds = _cosmo_bounds_from_pspace(pspace, fixed_parameter_values)
+
+    z_host, log_w_host, n_avail = build_host_draws(
+        np.asarray(zgals), np.asarray(data["wgals_pe"]),
+        np.asarray(data["ngals_pe"]), np.asarray(s2u), dL, bounds,
+        nEvents, nsamp, n_draw=n_draw,
+        z_max=(None if zmax is None else float(zmax)),
+        seed=int(getattr(opts, "seed", 0)),
+    )
+    opts.host_draws = dict(
+        host_z=jnp.asarray(z_host), host_log_w=jnp.asarray(log_w_host),
+    )
+
+    free = {k: v for k, v in bounds.items() if v[0] != v[1]}
+    print(f"  [i] MC source: galaxy redshifts -- {n_draw} draws/event from "
+          f"{int(n_avail.min()):,}-{int(n_avail.max()):,} catalogued galaxies "
+          f"(median {int(np.median(n_avail)):,})", flush=True)
+    print(f"      window spans the sampled cosmology box "
+          f"({', '.join(f'{k} in [{v[0]:g}, {v[1]:g}]' for k, v in free.items()) or 'all fixed'})",
+          flush=True)
+    dead = int((n_avail == 0).sum())
+    if dead:
+        print(f"  [!] {dead} event(s) have NO catalogued galaxy in the window "
+              "and will contribute log Z = -inf.", flush=True)
+
+
+def _resolve_measure_cancellation(opts, data, fixed_parameter_values, prior_overrides):
+    """Set ``opts.measure_cancels`` from the catalog's own kernel widths.
+
+    Resolved after the catalog is loaded and BEFORE the parameter space is
+    built, so one verdict gates both the sampled ``delta`` label and the
+    kernel-norm path.
+    """
+    from darksirens.redshift.catalog import (
+        kernel_measure_cancels, max_effective_kernel_width,
+    )
+    opts.measure_cancels = False
+    if opts.universe_model != "dark_sirens_complete":
+        return
+
+    views = []
+    for src in list(data.get("catalogs") or ()) + [data]:
+        if not isinstance(src, dict):
+            continue
+        for sfx in ("_pe", "_sel", ""):
+            dz = src.get(f"dzgals{sfx}")
+            if dz is not None:
+                views.append((dz, src.get(f"ngals{sfx}")))
+    if not views:
+        return
+
+    floor = float(getattr(opts, "sigma_eff_floor", None) or 1e-4)
+    thresh = float(getattr(opts, "dz_fast_thresh", None) or 1e-4)
+    sigma_kde_max = _sampled_sigma_kde_upper_bound(fixed_parameter_values, prior_overrides)
+    widest = max(max_effective_kernel_width(dz, ng, sigma_kde_max, floor)
+                 for dz, ng in views)
+    ok = all(kernel_measure_cancels(dz, ng, sigma_kde_max, floor, thresh)
+             for dz, ng in views)
+    opts.measure_cancels = bool(ok)
+    print(f"  [i] g(z) cancels: {ok}  (widest sigma_eff = {widest:.3g} vs "
+          f"--dz_fast_thresh {thresh:g}; sigma_kde <= {sigma_kde_max:g})",
+          flush=True)
+    if ok:
+        print("      delta dropped from the sampled set; Z_i = g(z_i) replaces "
+              "the kernel quadrature", flush=True)
+
+
+def _sampled_sigma_kde_upper_bound(fixed_parameter_values, prior_overrides):
+    """Widest ``sigma_kde`` this run can reach: its fixed value or prior bound."""
+    fixed = fixed_parameter_values or {}
+    if "sigma_kde" in fixed:
+        return float(fixed["sigma_kde"])
+    ov = prior_overrides or {}
+    if "sigma_kde" in ov:
+        return float(max(ov["sigma_kde"]))
+    from darksirens.inference.prior import _SURVEY_BLOCK
+    for spec in _SURVEY_BLOCK:
+        if spec.label == "sigma_kde":
+            return float(spec.upper)
+    raise RuntimeError("sigma_kde is not in the survey registry")
+
+
 def _configure_performance_grids(opts):
     # Normalisation grids + the PHY-5 pairing-grid coverage guard live in
     # cli.common so the lensing CLI runs exactly the same resolution: the pairing
@@ -2811,13 +2998,22 @@ def _validate_run_config(opts):
             "Exactly one of --gw_path (stored PE samples) or --gw_flows_path "
             "(per-event flow surrogates) is required."
         )
-    if bool(opts.gwselection_path) == bool(opts.pdet_flow_path):
+    _n_sel_sources = sum(
+        bool(x) for x in (opts.gwselection_path, opts.pdet_flow_path,
+                          getattr(opts, "beta_table", None))
+    )
+    if _n_sel_sources != 1:
         _fatal(
-            "Exactly one of --gwselection_path (injection file) or "
-            "--pdet_flow_path (P_det emulator) is required."
+            "Exactly one of --gwselection_path (injection file), "
+            "--pdet_flow_path (P_det emulator) or --beta_table (tabulated "
+            f"log mu) is required; got {_n_sel_sources}."
         )
-    if getattr(opts, "z_horizon", None) is not None and opts.z_horizon <= 0.0:
-        _fatal(f"--z_horizon must be > 0; got {opts.z_horizon}.")
+    if not getattr(opts, "sigma_eff_floor", 1e-4) > 0.0:
+        _fatal(f"--sigma_eff_floor must be > 0; got {opts.sigma_eff_floor}.")
+    if not getattr(opts, "dz_fast_thresh", 1e-4) > 0.0:
+        _fatal(f"--dz_fast_thresh must be > 0; got {opts.dz_fast_thresh}.")
+    if getattr(opts, "pop_z_horizon", None) is not None and opts.pop_z_horizon <= 0.0:
+        _fatal(f"--pop_z_horizon must be > 0; got {opts.pop_z_horizon}.")
     if opts.pdet_flow_path:
         # Orthogonal to the event source: valid with --gw_path or
         # --gw_flows_path alike.
@@ -3914,6 +4110,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         c_mode                 = opts.c_mode,
         selection_prior        = opts.selection_prior,
         selection_family       = opts.selection_family,
+        measure_cancels        = bool(getattr(opts, "measure_cancels", False)),
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]
@@ -4474,9 +4671,12 @@ def main(argv=None):
     ):
         return
     _resolve_single_catalog_marks(opts, data)
+    _resolve_measure_cancellation(opts, data, fixed_parameter_values, prior_overrides)
     pspace = _build_and_report_parameter_space(
         opts, data, prior_overrides, fixed_parameter_values
     )
+    _resolve_beta_table(opts, pspace)
+    _resolve_host_draws(opts, data, pspace, fixed_parameter_values)
     # Run directory + settings.json BEFORE the likelihood build and sampling:
     # from here on every failure mode leaves a record on disk, the sampler has
     # somewhere to checkpoint, and --resume has a directory to continue in.

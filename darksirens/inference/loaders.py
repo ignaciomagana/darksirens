@@ -529,6 +529,13 @@ def _read_spin_block(path):
         ])
 
 
+def _beta_table_selection(opts) -> bool:
+    """True when log mu comes from a table, so no selection file was loaded."""
+    return bool(getattr(opts, "beta_table", None)) and not bool(
+        getattr(opts, "gwselection_path", None)
+    )
+
+
 def resolve_selection_inputs(opts, fit_columns=None):
     """Selection inputs from exactly one source: injection HDF5 or P_det emulator.
 
@@ -540,6 +547,10 @@ def resolve_selection_inputs(opts, fit_columns=None):
     through to the file loader only when it departs from the chi_eff
     default, so test doubles with the legacy signature keep working.
     """
+    if getattr(opts, "beta_table", None) and not getattr(opts, "gwselection_path", None):
+        one = np.ones(1, dtype=float)
+        return (30.0 * one, 25.0 * one, 1000.0 * one, 0.0 * one,
+                0.0 * one, 0.0 * one, one, 1.0)
     if getattr(opts, "pdet_flow_path", None):
         from darksirens.gw.selection import pseudo_injections_from_pdet_flow
 
@@ -779,6 +790,20 @@ def load_gw_and_selection_inputs(opts) -> dict:
     gw_attrs = _read_store_attrs(opts.gw_path)
     spin_pe = _read_spin_block(opts.gw_path) if component_basis else None
 
+    n_mc = getattr(opts, "n_mc_samples", None)
+    if (getattr(opts, "mc_source", "gw_samples") == "gw_samples"
+            and n_mc is not None and int(n_mc) < nsamp):
+        keep = int(n_mc)
+        idx = (np.arange(nEvents)[:, None] * nsamp
+               + np.arange(keep)[None, :]).reshape(-1)
+        m1det, m2det, dL = m1det[idx], m2det[idx], dL[idx]
+        chieff, ra, dec, p_pe = chieff[idx], ra[idx], dec[idx], p_pe[idx]
+        if spin_pe is not None:
+            spin_pe = spin_pe[idx]
+        print(f"  [i] --n_mc_samples: thinned PE from {nsamp} to {keep} "
+              f"samples/event", flush=True)
+        nsamp = keep
+
     # Load Selection samples (Always required).  When both sides are gwcat
     # files, cross-check the 2.1 pairing contract; the emulator path instead
     # checks the PE file's basis against the emulator's fixed chieff basis.
@@ -799,10 +824,12 @@ def load_gw_and_selection_inputs(opts) -> dict:
         m1detsels, m2detsels, dLsels, chieffsels,
         rasels, decsels, p_draw, Ndraw,
     ) = resolve_selection_inputs(opts, fit_columns=required_columns)
+    _has_sel_file = bool(getattr(opts, "gwselection_path", None))
     spin_sel = (
-        _read_spin_block(opts.gwselection_path) if component_basis else None
+        _read_spin_block(opts.gwselection_path)
+        if component_basis and _has_sel_file else None
     )
-    if not getattr(opts, "pdet_flow_path", None):
+    if _has_sel_file and not getattr(opts, "pdet_flow_path", None):
         selection_attrs = _read_store_attrs(opts.gwselection_path)
         _require_matching_contract(
             gw_attrs, selection_attrs, opts.gw_path, opts.gwselection_path
@@ -956,6 +983,10 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
             # barriered device arrays and build a single KDE cache.
             pixels_pe_np = np.asarray(pixels_pe, dtype=np.int32)
             pixels_sel_np = np.asarray(pixels_sel, dtype=np.int32)
+            if _beta_table_selection(opts):
+                pixels_sel_np = np.full_like(
+                    pixels_sel_np, int(pixels_pe_np.reshape(-1)[0])
+                )
             union_pixels = unique_inference_pixels(
                 pixels_pe_np, pixels_sel_np, required_pixels=required_pixels
             )
@@ -989,8 +1020,13 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
                 pixels_pe, ngals_host, required_pixels=required_pixels,
                 pixel_ids=_cat_pixel_ids,
             )
+            _pix_sel_rows = (
+                np.full_like(np.asarray(pixels_sel, dtype=np.int32),
+                             int(np.asarray(pixels_pe).reshape(-1)[0]))
+                if _beta_table_selection(opts) else pixels_sel
+            )
             unique_pixels_sel, sample_to_unique_sel, ngals_sel = _compact_pixel_rows(
-                pixels_sel, ngals_host, required_pixels=required_pixels,
+                _pix_sel_rows, ngals_host, required_pixels=required_pixels,
                 pixel_ids=_cat_pixel_ids,
             )
 

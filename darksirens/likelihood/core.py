@@ -32,6 +32,7 @@ from darksirens.likelihood.selection import (
 )
 from darksirens.inference.utils import log_sample_weight, log_target_density_base_and_z
 from darksirens.likelihood.events import pad_gw_event_to_multiple
+from darksirens.likelihood.host_weight import host_log_weights
 from darksirens.likelihood.wl_weight import (
     log_sample_weight_wl_or_standard,
     log_sample_weight_wl_lognormal_hermite,
@@ -519,6 +520,8 @@ def _pe_chunk_plan(nEvents: int, pe_block: int) -> tuple[int, int, bool]:
         "lss_field_mode",
         "lss_member_diagnostics",
         "materialize_redshift_prior_state",
+        "measure_cancels",
+        "log_mu_table_fn",
         "selection_neff_soft_guard",
         "n_catalogs",
         "catalog_sky_weighting",
@@ -601,11 +604,25 @@ def darksiren_log_likelihood(
     # (per-event reweighting variances + N_obs^2/Neff_sel); traced on purpose
     # (arithmetic only) so sensitivity scans do not recompile.
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
-    # GW detection horizon: P_det(z) = 0 for z > z_horizon, applied ONLY to the
-    # selection integral (never the per-event PE numerator).  Putting it on the
-    # numerator too makes the per-event support cosmology-dependent and drives
-    # the H0 posterior into a sliver at the catalog's hard z edge.
-    z_horizon: float = float("inf"),
+    # the galaxy measure g(z) divides out of the complete-catalog kernels and 
+    # is reapplied per sample, so once every kernel is narrower than --dz_fast_thresh 
+    # it cancels exactly
+    measure_cancels: bool = False,
+    # Tabulated selection integral.  When set, log mu comes from this callable
+    # (a ``beta_interp`` interpolator over the sampled cosmology) instead of
+    # from the injection sum, and the Neff guard is bypassed. See ``likelihood/beta_interp.py``.
+    log_mu_table_fn=None,
+    # Host-sum PE estimator: sum over catalogued hosts at fixed z_g instead of
+    # over PE samples, so nothing slides across the catalog comb as H0 varies.
+    # All four arrays are built at load time by ``likelihood/host_items.py``;
+    # the draws MUST be frozen across calls (common random numbers) or the
+    # roughness this removes comes straight back.  See ``host_weight.py``.
+    host_z=None,
+    host_log_w=None,
+    host_kde_bandwidth: float = 0.15,
+    # Population edge: no probability mass past z > pop_z_horizon, in the
+    # selection integral and the PE numerator alike.
+    pop_z_horizon: float = float("inf"),
     # --- K-catalog mixture (dark_sirens only) -------------------------------
     # ``n_catalogs`` is static (jit specializes on the pytree structure); the
     # mixture operands are TRACED.  All default to the single-catalog values, so
@@ -861,6 +878,25 @@ def darksiren_log_likelihood(
             f"nEvents={nEvents}."
         )
     pe_block = nEvents if pe_event_block is None else min(pe_event_block, nEvents)
+    # Host-sum estimator: on when the loader supplied the draws.  n_host is
+    # STATIC (it sets every chunk shape), so it is read at trace time.
+    host_sum_enabled = host_z is not None
+    if host_sum_enabled:
+        if host_log_w is None:
+            raise ValueError(
+                "host_z was given without host_log_w; the galaxy-redshift MC "
+                "source needs both (see likelihood/host_items.py)."
+            )
+        n_host = int(jnp.shape(host_z)[1])
+        # Hosts per tile inside host_log_weights.  XLA fuses the (tile, nsamp)
+        # mass grid into ~200x its own size across the event vmap (MEASURED:
+        # 190.75 GiB for a 1.02 GB grid, job 1181188), so the tile is sized to
+        # keep tile x nsamp x pe_block small rather than to fill the card.
+        _HOST_TILE_ELEMS = 2.0e6
+        _host_chunk = max(1, int(_HOST_TILE_ELEMS / max(pe_block * nsamp, 1)))
+    else:
+        n_host = 0
+        _host_chunk = 1
     # The per-event counterpart selection (bright sirens) sets
     # ``active_counterpart_index`` per event, which the block path cannot express
     # (it left at the inert default).  Presence of ANY per-event counterpart
@@ -945,6 +981,7 @@ def darksiren_log_likelihood(
             mark_names=mark_names_all[k],
             materialize_state=materialize_redshift_prior_state,
             catalog_sky_weighting=catalog_sky_weighting,
+            measure_cancels=measure_cancels,
         )
         share_k = (
             k < len(share_prior_state_by_catalog)
@@ -959,6 +996,7 @@ def darksiren_log_likelihood(
                 mark_names=mark_names_all[k],
                 materialize_state=materialize_redshift_prior_state,
                 catalog_sky_weighting=catalog_sky_weighting,
+                measure_cancels=measure_cancels,
             )
         univ_states.append(state_univ)
         sel_states.append(state_sel)
@@ -1080,6 +1118,10 @@ def darksiren_log_likelihood(
                     wl_enabled=wl_enabled,
                     spin=spin, dL_grid=_dL_grid,
                 )
+            # A hard population prior edge in redshift space
+            supported = supported & (
+                z_of_dL_precomputed(dL_c, _dL_grid) <= pop_z_horizon
+            )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
         def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None):
@@ -1111,7 +1153,7 @@ def darksiren_log_likelihood(
                     spin=spin, dL_grid=_dL_grid,
                 )
             # Detection horizon P_det=0 for z>z_hor
-            within_horizon = z_of_dL_precomputed(dL_c, _dL_grid) <= z_horizon
+            within_horizon = z_of_dL_precomputed(dL_c, _dL_grid) <= pop_z_horizon
             return jnp.where(
                 supported & within_horizon & jnp.isfinite(ldw), ldw, -jnp.inf
             )
@@ -1122,15 +1164,19 @@ def darksiren_log_likelihood(
                 m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=spin
             )
 
-        log_mu, Neff, _log_sigma2 = compute_selection_term(
-            gw_sel,
-            catalogs_sel_all,
-            log_weight,
-            Ndraw,
-            nEvents,
-            sel_batch_size=sel_batch_size,
-            sky_log_weight_fn=sky_log_weight_fn,
-        )
+        if log_mu_table_fn is not None:
+            log_mu = log_mu_table_fn(cosmo, pop_params)
+            Neff = jnp.asarray(jnp.inf, dtype=jnp.float64)
+        else:
+            log_mu, Neff, _log_sigma2 = compute_selection_term(
+                gw_sel,
+                catalogs_sel_all,
+                log_weight,
+                Ndraw,
+                nEvents,
+                sel_batch_size=sel_batch_size,
+                sky_log_weight_fn=sky_log_weight_fn,
+            )
 
         # ----- Per-event PE reduction -------------------------------------
         # Each event contributes log Ẑ_i (importance average over its nsamp PE
@@ -1146,6 +1192,39 @@ def darksiren_log_likelihood(
         # nEvents`` (the None default) is a single vectorized pass.  Bright
         # sirens set active_counterpart_index per event, which the block path
         # cannot express, so ``has_counterpart`` keeps the exact scan verbatim.
+
+        def _host_chunk_ldw(s, n):
+            """Masked per-HOST log-weights for a chunk of ``m = n/n_host``
+            events starting at flat index ``s``.
+
+            The host-sum estimator: sum over catalogued hosts at their FIXED
+            z_g instead of over PE samples, so nothing slides across the
+            catalog comb as H0 varies.  Same shape contract as
+            ``_pe_chunk_ldw`` -- the reduction below is shared."""
+            m = n // n_host
+            ev0 = s // n_host
+            sl2 = lambda arr: lax.dynamic_slice_in_dim(arr, ev0, m)
+            # The mass sector is MARGINALISED over the PE samples inside
+            # host_log_weights, so the whole (m, nsamp) block is passed, not a
+            # per-event representative: m1det spreads 32% within an event here
+            # (q 54%), and collapsing it to one sample makes the likelihood as
+            # rough as the estimator this replaces.
+            per_ev = lambda arr: lax.dynamic_slice_in_dim(
+                arr, ev0 * nsamp, m * nsamp
+            ).reshape(m, nsamp)
+            ldw = jax.vmap(
+                lambda zz, lw, dl, m1, qq, ce, lpe: host_log_weights(
+                    zz, lw, dl, m1, qq, ce, lpe,
+                    cosmo, pop_params, log_p_pop,
+                    zgrid=_cosmo_zgrid, dL_grid=_dL_grid, ddL_grid=None,
+                    pop_z_horizon=pop_z_horizon,
+                    kde_bandwidth=host_kde_bandwidth,
+                    host_chunk=_host_chunk,
+                )
+            )(sl2(host_z), sl2(host_log_w), per_ev(gw_pe.dL),
+              per_ev(gw_pe.m1det), per_ev(gw_pe.q), per_ev(gw_pe.chieff),
+              jnp.log(per_ev(gw_pe.prior_wt)))
+            return ldw.reshape(-1)
 
         def _pe_chunk_ldw(s, n):
             """Masked per-sample log-weights for the ``n`` contiguous PE samples
@@ -1177,6 +1256,11 @@ def darksiren_log_likelihood(
             # -inf must contribute -inf, not a NaN backward softmax.
             return jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
 
+        if has_counterpart and host_sum_enabled:
+            raise ValueError(
+                "the host-sum PE estimator does not support bright-siren "
+                "counterparts; drop the counterpart arrays or the host draws."
+            )
         if has_counterpart:
             # Bright sirens: active_counterpart_index is event-dependent, so keep
             # the exact per-event scan (bit-identical to the historical body).
@@ -1219,14 +1303,21 @@ def darksiren_log_likelihood(
             # mask.  ``_pe_chunk_plan`` decides whether that tail is taken at the
             # FULL block shape (overlapping the last full chunk, so ONE shape is
             # lowered for the whole plan) or at the remainder shape.
-            block_samps = pe_block * nsamp
+            # The host sum reduces over n_host draws per event instead of nsamp
+            # PE samples; every start index below is in ITEM units, so the plan
+            # is shared by keying it on n_item.
+            n_item = n_host if host_sum_enabled else nsamp
+            _chunk_ldw = _host_chunk_ldw if host_sum_enabled else _pe_chunk_ldw
+            block_samps = pe_block * n_item
             n_full, rem, overlap_tail = _pe_chunk_plan(nEvents, pe_block)
 
             def _reduce_events(s, m):
                 # s: flat sample start (traced or static); m: STATIC event count.
-                ldw = _pe_chunk_ldw(s, m * nsamp).reshape(m, nsamp)
+                # n_item is nsamp for the sampled path, n_host for the host sum;
+                # the reduction (-log n + logsumexp) is identical either way.
+                ldw = _chunk_ldw(s, m * n_item).reshape(m, n_item)
                 return jax.vmap(
-                    lambda row: log_evidence_and_mc_variance(row, nsamp)
+                    lambda row: log_evidence_and_mc_variance(row, n_item)
                 )(ldw)
 
             def _chunk_scan(_, s):
@@ -1238,7 +1329,7 @@ def darksiren_log_likelihood(
                 # through one scan: the kernel is traced (and lowered) once.
                 starts = jnp.asarray(
                     [i * block_samps for i in range(n_full)]
-                    + [(nEvents - pe_block) * nsamp]
+                    + [(nEvents - pe_block) * n_item]
                 )
                 _, stacked = lax.scan(_chunk_scan, None, starts)
                 # (n_full+1, pe_block) -> the n_full full chunks in event order,
@@ -1629,7 +1720,7 @@ def darksiren_log_likelihood(
             A_obs = tuple(o[0] for o in obs)
             idx = tuple(o[1] for o in obs)
             t = tuple(o[2] for o in obs)
-            supported = supported & (z_c <= z_horizon)
+            supported = supported & (z_c <= pop_z_horizon)
             pixk = tuple(_pix_col(pix_all, k) for k in range(n_catalogs))
             fitk, fpk = _latent_row_gather(pixk, catalogs_sel_all)
             # _sky_weight clamps dL internally, matching _batch_lse (which
