@@ -54,6 +54,8 @@ from __future__ import annotations
 import weakref
 
 import numpy as np
+
+from darksirens.utils.utils import array_shape
 import jax
 import jax.numpy as jnp
 from jax import lax, vmap
@@ -1058,7 +1060,7 @@ def _spread_probe_rows(zgals, ngals, n_probe: int) -> jnp.ndarray:
     ``-inf`` everywhere, which the sentinel mask drops, so probing empty rows
     would leave the guard vacuously true.
     """
-    n_rows = int(np.asarray(zgals).shape[0])
+    n_rows = int(array_shape(zgals)[0])
     occ = (np.arange(n_rows) if ngals is None
            else np.flatnonzero(np.asarray(ngals) > 0))
     if occ.size == 0:

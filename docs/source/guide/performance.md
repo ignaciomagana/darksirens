@@ -119,6 +119,35 @@ both arms, so the compiled graph and the likelihood are unchanged
 (max |dlogL| 0.0 across the benchmark coordinates) and the per-call median is
 flat at 58.6–59.2 ms.
 
+Shape reads follow the same rule as the sizing scan: a build-time site that
+needs only a galaxy table's row or column count reads `.shape` from the
+`jax.Array` rather than `np.asarray(...)`, which runs the whole table through
+numpy — 676 MB per table on that catalog, ~0.17 s of device-to-host copy.
+
+What that buys is narrower than it looks, and the distinction is worth
+keeping. `np.asarray` caches its host copy on the `jax.Array`, so converting a
+shape-only reader that sits ahead of a site which genuinely consumes the same
+array's values only MOVES the one download. Instrumenting every first host
+materialisation of the production build shows exactly that: `full_z`'s 676 MB
+moves from `build_field_normalization_inputs` to `build_field_depth_inputs`,
+and the union `zgals`' 676 MB from `_spread_probe_rows` to
+`_rows_sorted_for_windowing`. Both of those consumers need the values, so that
+traffic is not recoverable without rewriting the reductions to run on device.
+What is actually removed is `field_depth_z`'s 182 MB (nothing else reads it on
+the host) and the 676 MB host-to-device re-upload that
+`build_field_normalization_inputs` used to pay by rebinding `full_z` to its own
+numpy copy — with it, one fewer live 676 MB device buffer at build peak.
+Build-phase device-to-host traffic goes from 4259 MB in 161 transfers to
+4076 MB in 160.
+
+The wall-clock effect is correspondingly small. Over six interleaved launches
+per arm on the same run and box, the build-phase median goes from 13.62 s to
+13.50 s (base 13.43–13.68 s against 13.21–13.63 s, so the ranges overlap) and
+load-plus-build-plus-first-call from 32.96 s to 32.86 s, which is inside the
+launch-to-launch spread — read the total startup as unchanged. The per-call
+median is flat at 58.9–59.0 ms and max |dlogL| is 0.0 on every benchmark
+coordinate (no value is read, only a shape).
+
 Measured on a DESI-like mixed spectroscopic-plus-photometric catalog (73% of
 widths in `[0.02, 0.10]`, 2158 galaxies per row), a pinned `W = 1024` moved
 `log p_cat` by 0.17 nats on average and 0.36 at worst against the full-row
