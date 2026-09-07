@@ -87,7 +87,7 @@ def test_preflight_finite_passes_through(capsys):
     # Must not raise.
     _nested_sampler_preflight(_finite_likelihood, _IDENTITY_PTFORM, 3, opts)
     out = capsys.readouterr().out
-    assert "preflight: 32/32 prior draws have finite logL" in out
+    assert "preflight: 4/4 prior draws have finite logL" in out
     assert "finite logL in [" in out
     # The elapsed-seconds cost is reported.
     assert " s]" in out
@@ -234,3 +234,33 @@ def test_guard_summary_explicit_modes_and_cap():
     soft = format_selection_guard_summary("soft", "dynesty", soft_guard=True,
                                           max_likelihood_variance=1.0)
     assert "SOFT (explicit)" in soft
+
+
+def test_preflight_stops_after_the_fourth_finite_draw(capsys):
+    """The probe is an early exit: 4 finite draws settle both verdicts."""
+    calls = []
+
+    def counting_likelihood(theta):
+        calls.append(theta)
+        return -1.0
+
+    opts = SimpleNamespace(seed=7, nlive=40)
+    _nested_sampler_preflight(counting_likelihood, _IDENTITY_PTFORM, 3, opts)
+    assert len(calls) == 4
+    out = capsys.readouterr().out
+    assert "preflight: 4/4 prior draws have finite logL" in out
+
+
+def test_preflight_probes_all_draws_when_few_are_finite(capsys):
+    """0 < k <= 3 cannot break early, so the warning still sees all 32."""
+    calls = []
+
+    def rarely_finite(theta):
+        calls.append(theta)
+        return -1.0 if len(calls) in (1, 5) else -np.inf
+
+    opts = SimpleNamespace(seed=7, nlive=40)
+    _nested_sampler_preflight(rarely_finite, _IDENTITY_PTFORM, 3, opts)
+    assert len(calls) == 32
+    out = capsys.readouterr().out
+    assert "2/32 prior draws are finite" in out
