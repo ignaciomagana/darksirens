@@ -3202,16 +3202,20 @@ def _block_sizing_inputs(opts, data):
     # — the memory model was blind to it before, which made --norm_nq defeat the
     # OOM guard entirely.
     # Since 2026-09-05 the default pairing normaliser no longer reads n_q: it
-    # integrates on at most 2 x utils.PAIRING_PANEL_NQ = 32 STATIC Gauss-Legendre
-    # nodes (PairingModel._panel_norm), and since 2026-09-06 on only 16 for the
-    # two production pairings, whose plateau panel is a closed form
-    # (PairingModel._plateau_integral).  n_q still sizes get_q_grid(), the
-    # per-sample q axis of the GP baselines (gw/populations/gp.py) and of the
+    # integrates on at most 2 x utils.PAIRING_PANEL_NQ = 64 STATIC Gauss-Legendre
+    # nodes (PairingModel._panel_norm), and since 2026-09-06 on only
+    # PAIRING_PANEL_NQ = 32 of them for the two production pairings, whose
+    # plateau panel is a closed form (PairingModel._plateau_integral).
+    # PAIRING_PANEL_NQ was 16 until 2026-09-06, when the taper panel's H0-tilt
+    # residual forced it to 32; this comment's arithmetic tracks that constant
+    # and must be re-derived if it moves again.  n_q still sizes get_q_grid(),
+    # the per-sample q axis of the GP baselines (gw/populations/gp.py) and of the
     # stratified-q tables, and it is deliberately left as this model's input:
-    # the guard then over-estimates the pairing working set 6-12x, which is
-    # safe, and the resolved blocking is bit-identical to what every prior run
-    # used (measured: sel_batch=None, pe_block=None, kde_window=3456 on the
-    # 259-event DESI nside-64 configuration, in every arm of every A/B).  A future
+    # the guard then over-estimates the pairing working set ~3-6x (it was 6-12x
+    # at PAIRING_PANEL_NQ = 16), which is still safe, and the resolved blocking
+    # is bit-identical to what every prior run used (measured: sel_batch=None,
+    # pe_block=None, kde_window=3456 on the 259-event DESI nside-64
+    # configuration, in every arm of every A/B, at both node counts).  A future
     # knob for the panel node count must be wired in HERE, or the guard goes
     # stale in the unsafe direction.
     from darksirens.gw.populations.utils import normalization_grid_settings

@@ -20,14 +20,18 @@ log I says linear interpolation is outside ``pairing_edge_tol``.
 
 Since 2026-09-05 that rule is the SAME two-panel split at the taper shoulder the
 exact branch uses (``PairingModel._panel_norm``), only at ``pairing_edge_nq``
-nodes per panel against the exact branch's ``PAIRING_PANEL_NQ = 16``.  That is
-what makes the headline assertion below -- the grid branch is never worse than
-the branch it approximates -- hold BY CONSTRUCTION (a strictly finer rule on an
-identical split) FOR THE SAMPLES THAT TAKE THAT RULE.  The trusted samples in
-the same sweep take ``jnp.interp`` of log I instead, which no node count
-constrains, so for them the assertion is calibration after all: the measured
-margin runs from 1.45x (m_min = 2, dm_min = 10, beta = 0 at N_grid = 2048) to
-199x.  ``pairing_edge_nq`` may not drop below ``PAIRING_PANEL_NQ``;
+nodes per panel against the exact branch's ``PAIRING_PANEL_NQ`` (32 since
+2026-09-06, 16 before it; the default ``pairing_edge_nq`` tracked it 24 -> 48).
+That is what makes the headline assertion below -- the grid branch is no worse
+than the branch it approximates -- hold BY CONSTRUCTION (a strictly finer rule
+on an identical split) FOR THE SAMPLES THAT TAKE THAT RULE.  The trusted samples
+in the same sweep take ``jnp.interp`` of log I instead, which no node count
+constrains, so for them the assertion is calibration after all -- and since
+2026-09-06 it is the interpolant, not the exact branch, that is the weaker of
+the two: raising PAIRING_PANEL_NQ improved the exact branch by ~1e3 in this
+window and left the interpolant where it was, so the assertion below is a
+factor-of-two bound (measured worst ratio 1.71) rather than a strict
+ordering.  ``pairing_edge_nq`` may not drop below ``PAIRING_PANEL_NQ``;
 ``NormalizationGridSettings.__post_init__`` rejects that and
 tests/test_pairing_panel_quadrature.py pins the default.
 
@@ -153,9 +157,22 @@ def test_support_edge_tracks_a_converged_reference(n_grid, capsys):
             print(f"    m_min={m_min:5} dm={dm_min:6} beta={beta:5}: "
                   f"grid={eg:.3e}  exact-branch={ee:.3e}")
     for m_min, dm_min, beta, eg, ee in rows:
-        # Absolute accuracy, and never worse than the branch it approximates.
+        # Absolute accuracy first: this is the pin that catches the 22.6-nat
+        # collapse the clamp used to produce.
         assert eg < 5.0e-3, (m_min, dm_min, beta, eg)
-        assert eg <= ee + 1.0e-9, (m_min, dm_min, beta, eg, ee)
+        # And no worse than the branch it approximates, to within a factor of
+        # two.  The ORDERING is by construction only for the samples that take
+        # the edge rule (a strictly finer rule on an identical panel split); the
+        # TRUSTED samples in this window are jnp.interp of log I and their error
+        # is set by the m1 grid, which no node count moves.  That distinction
+        # became visible on 2026-09-06, when PAIRING_PANEL_NQ went 16 -> 32 and
+        # the exact branch improved by ~1e3 here (worst 7.2e-3 -> 1.5e-3 at
+        # N_grid = 2048) while the interpolant did not: the measured grid/exact
+        # ratio is <= 1.71 over these 14 rows, worst at (10, 10, 7), where both
+        # branches sit at 3-5e-4 nats.  Tightening pairing_edge_tol does not
+        # move it (measured flat from 1e-4 down to 1e-8), so the honest bound is
+        # a factor, not a strict ordering.
+        assert eg <= 2.0 * ee + 1.0e-9, (m_min, dm_min, beta, eg, ee)
 
 
 # ---------------------------------------------------------------------------

@@ -157,8 +157,8 @@ _MASS_NORM_GRID = np.linspace(1.0, 200.0, 500)
 # numpy-only for the same reason the taper filters above are: this generator
 # stays importable without the darksirens package).  Since 2026-09-05 the
 # inference normalises p(q | m1) on TWO Gauss-Legendre panels split at the taper
-# shoulder, 16 nodes each, in place of a 200-node uniform q trapezoid, and the
-# mock must use the SAME rule or the stored pdraw and the inference target
+# shoulder, PAIRING_PANEL_NQ nodes each, in place of a 200-node uniform q
+# trapezoid, and the mock must use the SAME rule or the stored pdraw and the inference target
 # disagree by the difference of two quadratures (measured 5.4e-4 relative,
 # against the 1e-5 tests/test_mock_generator_taper.py allows).  The mirror is
 # pinned STRUCTURALLY, not just numerically:
@@ -168,8 +168,8 @@ _MASS_NORM_GRID = np.linspace(1.0, 200.0, 500)
 # comparison in the same file is dominated by the mass grid and does NOT see a
 # node-count drift (measured: its worst residual stays 4.9e-6 whether the
 # package uses 16, 24, 32 or 64 nodes per panel).  Anyone changing
-# PAIRING_PANEL_NQ must change this too.
-_PAIR_PANEL_NQ = 16
+# PAIRING_PANEL_NQ must change this too -- it went 16 -> 32 on 2026-09-06.
+_PAIR_PANEL_NQ = 32
 _PAIR_GL_X, _PAIR_GL_W = np.polynomial.legendre.leggauss(_PAIR_PANEL_NQ)
 _PAIR_GL_T = 0.5 * (_PAIR_GL_X + 1.0)
 _PAIR_GL_WT = 0.5 * _PAIR_GL_W
