@@ -20,6 +20,13 @@ Goldens are stored PER JAX BACKEND (cpu/gpu reductions differ at the ULP
 level), keyed by ``jax.default_backend()``; a backend with no recorded
 goldens fails with a regeneration hint.
 
+UNRECORDED CELL: ``empty_row_routing`` was added with the perf campaign's
+empty-catalog-row routing and is recorded for ``cpu`` only -- the two ``gpu:*``
+banks must be regenerated ON THAT HARDWARE (the box this was added on is an
+H100 NVL, which has no bank at all) and will report a missing golden for that
+one cell until then.  No other cell moved: the routing arms for no other
+fixture.
+
 STALE CELL: the two ``gpu:*`` ``wl_lognormal`` entries predate the PHY-06 fix
 (the lognormal Hermite backend now carries the proposal-to-target density
 ratio, which moves that cell by ~6%).  The cpu entry was regenerated with the
@@ -340,6 +347,26 @@ def _cell_sel_batch():
     return _base_opts(sel_batch_size=3), _full_sky_data()
 
 
+def _cell_empty_row_routing():
+    """The empty-catalog-row sample routing, LIVE.
+
+    Every other cell builds it away: ``_full_sky_data`` gives every pixel one
+    galaxy (no empty row exists at all), and the ``_sparse_sky_data`` cells that
+    do empty pixel 2 are ``dark_sirens_complete``, which the routing refuses.
+    Both the sampled-cosmology opts and the PE pixel are needed here -- a frozen
+    redshift prior makes the routing inadmissible, and with ``pixels_pe = [7, 7]``
+    the PE side has no empty-row sample to route.
+
+    So: pixel 2 emptied (``ngals == 0``), one of the two PE samples and four of
+    the eight injections landing on it.  Both sides are routed, and the value
+    this cell pins is the routed one -- which is what puts the routed evaluator
+    inside the regression bank instead of only inside its own test file.
+    """
+    data = _sparse_sky_data()
+    data["pixels_pe"] = jnp.array([7, 2], dtype=jnp.int32)
+    return _base_opts(fix_cosmology=False), data
+
+
 CELLS = {
     "plain_full": _cell_plain_full,
     "plain_compact": _cell_plain_compact,
@@ -355,6 +382,7 @@ CELLS = {
     "wl_lognormal": _cell_wl_lognormal,
     "field_k1": _cell_field_k1,
     "sel_batch": _cell_sel_batch,
+    "empty_row_routing": _cell_empty_row_routing,
 }
 
 COORD_FRACTIONS = (0.5, 0.35, 0.65)
@@ -466,6 +494,44 @@ def _value(opts, data, coord_override=None):
     _labels, coords = _coords_for(opts)
     coord = coords[0] if coord_override is None else coord_override
     return float(ll(jnp.asarray(coord)))
+
+
+def test_empty_row_routing_is_live_and_changes_nothing():
+    """Two claims this cell would be worthless without.
+
+    LIVE: the build really does route (the other thirteen cells report ``()``),
+    so the golden above is a value the routed evaluator produced.
+    INERT ON THE PHYSICS: forcing the routing off reproduces it to ulp -- the
+    routing is a speed decision, and a cell that pinned a value only the routed
+    path can produce would be pinning a bug.
+    """
+    from darksirens.likelihood import factory as factory_mod
+
+    opts, data = _cell_empty_row_routing()
+    pop_fid, _overrides, fixed = _pop_bits()
+    ll_on = make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)
+    assert ll_on.empty_row_routing != ()
+    pe, sel = ll_on.empty_row_routing[0]
+    assert pe is not None and sel is not None
+    plain_opts, plain_data = _cell_plain_full()
+    assert make_likelihood(
+        plain_opts, plain_data, pop_fid,
+        fixed_parameter_values=fixed).empty_row_routing == ()
+
+    real = factory_mod._empty_row_routing
+    factory_mod._empty_row_routing = lambda *a, **k: ()
+    try:
+        opts_off, data_off = _cell_empty_row_routing()
+        ll_off = make_likelihood(
+            opts_off, data_off, pop_fid, fixed_parameter_values=fixed)
+    finally:
+        factory_mod._empty_row_routing = real
+    assert ll_off.empty_row_routing == ()
+    _labels, coords = _coords_for(opts)
+    for c in coords:
+        v_on = float(ll_on(jnp.asarray(c)))
+        v_off = float(ll_off(jnp.asarray(c)))
+        np.testing.assert_allclose(v_on, v_off, rtol=1e-12, atol=0.0)
 
 
 def test_qdet_is_live():

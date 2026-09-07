@@ -728,6 +728,110 @@ def _grid_bracket(z):
     return idx, jnp.clip(t, 0.0, 1.0)
 
 
+class EmptyRowRouting(NamedTuple):
+    """Build-time partition of one sample set by "is my catalog row empty?".
+
+    A dark-siren sample whose pixel row holds NO galaxies pays the full
+    per-sample catalog KDE -- ``N_max_gals`` gathers, exponentials and one
+    reduction -- for a result the evaluator then throws away: ``row_empty[pix]``
+    selects an exact ``-inf`` at :func:`~darksirens.redshift.catalog.eval_log_catalog_prior_state`
+    and ``log_Nobs[pix]`` is ``-inf`` as well, so the sample's prior collapses to
+    the missing-galaxy branch alone.  On the production DESI nside-64 catalog
+    18,682 of 49,152 rows are empty and 41.7% of the PE samples / 38.9% of the
+    injections land in one.
+
+    A sample's pixel is DATA -- it never depends on a proposal -- so the
+    partition is decided once, here, at build time:
+
+    ``idx_occ``   (n_occ,)   int32 -- samples whose row holds >= 1 galaxy,
+                                      in their original relative order
+    ``idx_empty`` (n_emp,)   int32 -- samples whose row is empty, ditto
+    ``inv_order`` (n_occ+n_emp,) int32 -- inverse of
+                                      ``concatenate([idx_occ, idx_empty])``
+    ``empty_rows`` (N_rows,) bool  -- the rows the partition called empty
+                                      (``ngals == 0``), carried so the graph can
+                                      VERIFY the routing predicate against the
+                                      kernels it actually built.
+
+    The evaluator gathers ``(z, pix)`` into the two groups, runs the unchanged
+    KDE on the occupied group, evaluates the KDE-free expression on the empty
+    group, and gathers the concatenation back through ``inv_order`` -- so the
+    vector it RETURNS is in the caller's original sample order and every
+    downstream reduction (the per-event ``(nEvents, nsamp)`` reshape, the
+    selection ``logsumexp``) sees the same values in the same slots.  Nothing
+    outside this module has to know the partition exists, and no other
+    per-sample array has to move.
+    """
+
+    idx_occ: Any
+    idx_empty: Any
+    inv_order: Any
+    empty_rows: Any
+
+
+def _routing_applies(routing, z) -> bool:
+    """Trace-time predicate: is ``routing`` the plan for THIS sample vector?
+
+    The plan is built for one full sample set (all PE samples, or all
+    injections).  A caller that hands the evaluator a SLICE of that set -- a
+    ``pe_event_block`` chunk, a padded ``sel_batch_size`` batch -- gets the
+    unrouted path, which is the exact expression the plan was derived from, so
+    the fallback costs speed and never accuracy.  ``z.shape`` is static at trace
+    time, so this is a Python branch, not a select.
+
+    A LENGTH match is necessary, not sufficient: two different sample vectors of
+    the same length both pass here.  Correctness does not rest on this
+    predicate -- :func:`_eval_dark_routed` verifies IN THE GRAPH that the samples
+    the plan routed really do sit on empty rows, so a plan applied to the wrong
+    same-length vector fails closed to ``-inf`` instead of returning a plausible
+    wrong number.
+    """
+    if routing is None:
+        return False
+    return (
+        getattr(z, "ndim", 0) == 1
+        and z.shape[0] == routing.inv_order.shape[0]
+    )
+
+
+def _empty_row_routing_ok(state, routing):
+    """In-graph verdict on the routing predicate's ROW half (``ngals == 0``).
+
+    The shortcut below is bit-exact only because ``log p_cat`` is exactly
+    ``-inf`` on every routed sample, and that is supplied by the
+    ``row_empty[pix]`` select in ``eval_log_catalog_prior_state``.  The routing
+    is derived from ``ngals == 0``, which is a SUBSET of
+    ``row_empty = ~any(isfinite(log_kw))`` on any catalog whose real galaxies
+    occupy the row prefix ``[0, ngals)`` -- but that is a property of the
+    kernels this trace built, not something the factory can promise.  So check
+    it in the graph: one ``(N_rows,)`` reduce (49,152 elements on production,
+    unmeasurable next to a 1e6-sample KDE) that is True only when every row the
+    plan called empty really is empty.
+
+    The verdict is spent on the WHOLE returned vector, and it is spent as
+    ``-inf``, not NaN: every per-sample NaN in this likelihood dies at
+    ``where(valid & isfinite(ldw), ldw, -inf)`` before it can reach a reduction
+    (likelihood/core.py), so a NaN poison here would be silently swallowed.
+    Driving every sample's prior to ``-inf`` instead makes the TOTAL
+    log-likelihood ``-inf`` at every coordinate -- a run that cannot start, not
+    a plausible wrong number.  Returns ``None`` when the kernels carry no
+    ``row_empty`` at all, which the caller reads as "do not route".
+
+    This is only HALF the verdict.  It says "every row the plan CALLED empty is
+    empty" and says nothing about which SAMPLES were routed onto those rows --
+    a plan built for a different (same-length) sample vector, or one that moved
+    an occupied-row sample into ``idx_empty``, passes this check untouched.
+    :func:`_eval_dark_routed` ANDs in the sample half,
+    ``all(empty_rows[pix[idx_empty]])``, which is what actually makes the
+    substitution sound; the two belong together.
+    """
+    kernels = getattr(state, "kernels", None)
+    row_empty = getattr(kernels, "row_empty", None) if kernels is not None else None
+    if row_empty is None:
+        return None
+    return jnp.all(jnp.where(routing.empty_rows, row_empty, True))
+
+
 def _eval_dark_scalar(
     z, pix, state: DarkSirenPriorState, em_catalog: EMCatalog,
     catalog_sky_weighting: str = "conditional",
@@ -749,6 +853,80 @@ def _eval_dark_scalar(
     if catalog_sky_weighting == "field":
         return numerator - state.log_Z_global
     return numerator - state.log_Z[pix]
+
+
+def _eval_dark_scalar_empty_row(
+    z, pix, state: DarkSirenPriorState, catalog_sky_weighting: str = "conditional",
+):
+    """``_eval_dark_scalar`` with the catalog KDE replaced by its known answer.
+
+    Op for op :func:`_eval_dark_scalar`, with the ONE substitution
+    ``log_p_cat = -inf``: on a row with no galaxies the KDE's ``row_empty[pix]``
+    select returns exactly that, and ``nan_to_num`` cannot change it (the
+    front factors ``log g(z)`` and the ``z_depth`` / ``rows_sorted`` selects can
+    only turn ``-inf`` into ``-inf`` or NaN, and NaN maps back to ``-inf``).
+
+    Keeping the full ``logaddexp(log_Nobs[pix] + log_p_cat, log_miss)`` rather
+    than shortcutting to ``log_miss`` is deliberate: it makes the substitution
+    the ONLY difference from the reference path, so bit-identity needs no
+    separate claim about ``log_Nobs`` being ``-inf`` on empty rows (it is, but
+    ``x + (-inf) == -inf`` for every finite ``x`` and NaN for a NaN one, which
+    is exactly what the reference computes).
+    """
+    log_p_cat = -jnp.inf
+    idx, t = _grid_bracket(z)
+    miss = _interp_row(state.dN_miss[pix, idx], state.dN_miss[pix, idx + 1], t)
+    log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
+    numerator = jnp.logaddexp(state.log_Nobs[pix] + log_p_cat, log_miss)
+    if catalog_sky_weighting == "field":
+        return numerator - state.log_Z_global
+    return numerator - state.log_Z[pix]
+
+
+def _eval_dark_routed(
+    z, pix, state, em_catalog, catalog_sky_weighting, routing: EmptyRowRouting, ok,
+):
+    """Dark-siren prior over ``z`` with the empty-row samples routed past the KDE.
+
+    Two static groups, one unchanged evaluator on the occupied one, the KDE-free
+    expression on the empty one, and ONE gather to put the concatenation back in
+    the caller's sample order.  Because the inverse gather happens HERE -- before
+    the value ever leaves this function -- no reduction downstream is
+    re-associated and no other per-sample array has to be permuted.
+
+    The verdict spent on the result is BOTH halves of the routing predicate:
+    ``ok`` (every row the plan called empty really is empty, from
+    :func:`_empty_row_routing_ok`) AND ``all(empty_rows[pix[idx_empty]])`` --
+    every sample the plan ROUTED really does sit on one of those rows.  The
+    second half is the one that binds the plan to THIS ``pix`` vector: the plan
+    is selected by sample-vector LENGTH alone, and the factory derives it from
+    the catalog view's ``sample_to_unique_idx`` while the evaluator consumes
+    ``gw.pixels[:, k]`` -- two arrays kept in step by hand, in two factories.
+    If they ever fall out of step the routed samples stop being empty-row
+    samples, the substitution ``log p_cat = -inf`` stops being their KDE's
+    answer, and without this term the result would be a silent, finite, WRONG
+    number (measured at up to 2e-6 nats per sample on a toy catalog, and the
+    kind of decorrelated per-sample array that tilts with H0 at production
+    scale).  It costs one ``(n_emp,)`` int32 gather and a bool reduce -- 442k
+    elements against a 1e6-sample KDE on production, unmeasurable.
+    """
+    io, ie = routing.idx_occ, routing.idx_empty
+    pix_emp = pix[ie]
+    v_occ = vmap(
+        lambda z_i, p_i: _eval_dark_scalar(
+            z_i, p_i, state, em_catalog, catalog_sky_weighting
+        )
+    )(z[io], pix[io])
+    v_emp = vmap(
+        lambda z_i, p_i: _eval_dark_scalar_empty_row(
+            z_i, p_i, state, catalog_sky_weighting
+        )
+    )(z[ie], pix_emp)
+    out = jnp.concatenate([v_occ, v_emp])[routing.inv_order]
+    routed_rows_are_empty = jnp.all(routing.empty_rows[pix_emp])
+    # ``where`` and not an additive shift: an exactly-representable no-op on the
+    # clean branch, so the routed samples carry no arithmetic of their own.
+    return jnp.where(ok & routed_rows_are_empty, out, -jnp.inf)
 
 
 # ------------------------------------------------------------
@@ -944,6 +1122,7 @@ def eval_redshift_prior_with_state(
     survey: SurveyParams,
     em_catalog: EMCatalog,
     catalog_sky_weighting: str = "conditional",
+    empty_routing: "EmptyRowRouting | None" = None,
 ) -> jnp.ndarray:
     """Vectorised log p(z | pix) using a prepared state.  O(N_max) / sample.
 
@@ -952,6 +1131,19 @@ def eval_redshift_prior_with_state(
     ``model``.  The signature default ``"conditional"`` is the safe fallback for
     callers that supply no field-normalization inputs; the CLI resolves the
     user-facing default to ``"field"`` (the joint catalog host-density estimand).
+
+    ``empty_routing`` (:class:`EmptyRowRouting`, ``dark_sirens`` only) is the
+    build-time partition of THIS sample set into "my catalog row holds galaxies"
+    and "my catalog row is empty"; the second group skips the KDE and takes the
+    KDE-free expression instead.  The returned vector is in the caller's sample
+    order either way, and it agrees with the plain path SAMPLE BY SAMPLE to the
+    bit, so passing it is a speed decision only.  (The total log-likelihood
+    built out of it can still move at the last bit, because splitting one vmap
+    into two changes how XLA fuses and orders the reductions ABOVE this
+    function: measured at <= 4e-14 relative on the CPU backend and at exactly
+    0.0 on the production H100 build -- see ``docs/source/guide/performance.md``.)
+    ``None`` (the default), a slice of the planned set, or kernels that carry no
+    ``row_empty`` all fall back to the plain vmap.
     """
     if model == "spectral_sirens":
         return vmap(lambda z_i: log_interp_zgrid(z_i, state.log_pvol))(z)
@@ -967,6 +1159,13 @@ def eval_redshift_prior_with_state(
         )(z, pix)
 
     if model == "dark_sirens":
+        if _routing_applies(empty_routing, z):
+            routing_ok = _empty_row_routing_ok(state, empty_routing)
+            if routing_ok is not None:
+                return _eval_dark_routed(
+                    z, pix, state, em_catalog, catalog_sky_weighting,
+                    empty_routing, routing_ok,
+                )
         return vmap(
             lambda z_i, p_i: _eval_dark_scalar(
                 z_i, p_i, state, em_catalog, catalog_sky_weighting

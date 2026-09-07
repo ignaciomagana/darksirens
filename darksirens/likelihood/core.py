@@ -710,6 +710,18 @@ def darksiren_log_likelihood(
     # jit cache key, and its values ride in as arguments.  None (default) is the
     # pre-existing per-proposal evaluation, op for op.
     frozen_prior: "FrozenRedshiftPrior | None" = None,
+    # Build-time empty-catalog-row sample routing, one
+    # ``(routing_pe, routing_sel)`` pair per catalog (see
+    # ``redshift.prior.EmptyRowRouting``).  A TRACED pytree operand -- its
+    # STRUCTURE (which entries are None) is part of the jit cache key and its
+    # index arrays ride in as arguments.  ``()`` (default) is the pre-existing
+    # per-sample evaluation, op for op; a supplied plan only skips the catalog
+    # KDE on samples whose pixel row holds no galaxies, and returns the prior
+    # vector bit-identical to it, sample by sample and slot by slot.  (The TOTAL
+    # can still move at the last bit -- two vmaps in place of one change how XLA
+    # fuses the reductions above the evaluator; ulp-level, see
+    # ``redshift.prior._eval_dark_routed``.)
+    empty_row_routing: tuple = (),
     # Comoving-distance interpolation table (``utils.cosmology.rs``), threaded as
     # a jit ARGUMENT and bound as the active table for this trace.  None resolves
     # to whatever is active in the CALLER's scope, so no call site has to know
@@ -1082,7 +1094,18 @@ def darksiren_log_likelihood(
             [mixture_log_weights[k] + lp[:, k] for k in range(n_catalogs)]
         )
 
-    def _eval_prior_mix(model, states, z, pix, catalogs):
+    # Per-catalog empty-row routing plans, split by side.  Absent (the default)
+    # every entry is None and every call below is the historical one.
+    _routing_pe = tuple(
+        (empty_row_routing[k][0] if k < len(empty_row_routing) else None)
+        for k in range(n_catalogs)
+    )
+    _routing_sel = tuple(
+        (empty_row_routing[k][1] if k < len(empty_row_routing) else None)
+        for k in range(n_catalogs)
+    )
+
+    def _eval_prior_mix(model, states, z, pix, catalogs, routings):
         """log p(z | pix) for ``model`` across the K-catalog mixture.
 
         K = 1 is a STATIC shortcut -- the bare per-catalog evaluation with no
@@ -1090,17 +1113,25 @@ def darksiren_log_likelihood(
         is exactly the historical one.  For K >= 2 the per-catalog log priors
         are combined with the sampled log weights via the all--inf-safe
         logsumexp above.
+
+        ``routings`` is this side's length-K tuple of
+        :class:`~darksirens.redshift.prior.EmptyRowRouting` plans (or Nones).
+        Each catalog carries its OWN plan because each has its own compact pixel
+        column and its own ``ngals``; the evaluator returns the prior in the
+        caller's sample order either way, so the mixture combine is untouched.
         """
         if n_catalogs == 1:
             return eval_redshift_prior_with_state(
                 model, states[0], z, _pix_col(pix, 0), cosmo, surveys_all[0],
                 catalogs[0], catalog_sky_weighting=catalog_sky_weighting,
+                empty_routing=routings[0],
             )
         lps = [
             mixture_log_weights[k] + eval_redshift_prior_with_state(
                 model, states[k], z, _pix_col(pix, k),
                 cosmo, surveys_all[k], catalogs[k],
                 catalog_sky_weighting=catalog_sky_weighting,
+                empty_routing=routings[k],
             )
             for k in range(n_catalogs)
         ]
@@ -1145,10 +1176,14 @@ def darksiren_log_likelihood(
         # No finite guard on the redshift prior. -inf propagates correctly through
         # logsumexp and is caught by the final isfinite check.
         def log_prior_z(z, pix, catalogs):
-            return _eval_prior_mix(pe_model, states_univ, z, pix, catalogs)
+            return _eval_prior_mix(
+                pe_model, states_univ, z, pix, catalogs, _routing_pe
+            )
 
         def log_prior_z_selection(z, pix, catalogs):
-            return _eval_prior_mix(selection_model, states_sel, z, pix, catalogs)
+            return _eval_prior_mix(
+                selection_model, states_sel, z, pix, catalogs, _routing_sel
+            )
 
         def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalogs,
                                             spin=None, log_prior_vals=None):
