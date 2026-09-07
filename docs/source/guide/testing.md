@@ -21,8 +21,8 @@ two environment variables. It installs neither `gwcat` nor `tinyns`: both are
 imported lazily and the subset stubs `gwcat`. One file runs the same way, e.g.
 `... python -m pytest -q tests/test_unified_k1_golden.py`.
 
-Recorded size, measured 2026-08-23 (CPython 3.11.10, jax 0.4.34 CPU, numpy
-1.26.4): **68 files, 805 tests collected**. The CI job that runs it has a
+Recorded size, measured 2026-09-05 (CPython 3.11.10, jax 0.4.34 CPU, numpy
+1.26.4): **69 files, 823 tests collected**. The CI job that runs it has a
 30-minute timeout.
 
 That record is enforced: `tests/test_fast_subset_record.py` asserts that every
