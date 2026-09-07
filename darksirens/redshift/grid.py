@@ -56,6 +56,44 @@ _INTERP_DX0_EPS = float(_np.spacing(_np.finfo(_np.dtype(zgrid.dtype)).eps))
 _USE_SEARCHSORTED = os.environ.get("DARKSIRENS_INTERP_SEARCHSORTED") == "1"
 
 
+def zgrid_upper_index(z):
+    """Index ``i`` of the UPPER node of the ``zgrid`` cell bracketing ``z``.
+
+    Returns exactly ``clip(searchsorted(zgrid, z, side='right'), 1, n - 1)``
+    -- the shared index behind :func:`_interp_zgrid` and
+    ``redshift.prior._grid_bracket`` -- without the binary search.  ``zgrid``
+    is ``expm1`` of a UNIFORM grid in log(1+z) (see the construction above), so
+    ``v = log1p(z)/_DLOG`` IS the node coordinate: measured against the
+    tabulated nodes, ``|v - k| <= 2.3e-13`` at the 1086 nodes and ``v`` sits
+    strictly inside ``(k, k+1)`` in between, so ``floor(v)`` is the true index
+    except within ~2e-13 of a node, where it is off by exactly one.  The two
+    one-step corrections below compare ``z`` against the EXACT tabulated node
+    values and recover that case; an off-by-two would need a ``log1p`` relative
+    error of order ``_DLOG/log1p(z) ~ 1e-3``, thirteen orders of magnitude of
+    headroom, which is why the CPU verification carries over to XLA's libm.
+    The uniform-log(1+z) construction, not any node-agreement assertion, is the
+    admissibility precondition; it holds for every ``DARKSIRENS_ZMAX``
+    including the pinned-last-node cases (0.52, 0.65).
+
+    ``z >= zgrid[-1]`` is pinned to ``n - 1`` for ``z = +inf`` (where
+    ``floor(inf/_DLOG)`` overflows int32 to the negative clip bound).  ``NaN``
+    still lands on ``1`` where ``searchsorted`` lands on ``n - 1``; every
+    consumer folds the index into a weight that is ``NaN`` on BOTH paths, so
+    the divergence is value-inert (see ``prior._grid_bracket``).
+    """
+    x = jnp.asarray(z)
+    x = x.astype(jnp.result_type(x.dtype, zgrid.dtype))
+    n = zgrid.shape[0]
+    if _USE_SEARCHSORTED:
+        return jnp.clip(jnp.searchsorted(zgrid, x, side="right"), 1, n - 1)
+    i = jnp.clip(
+        jnp.floor(jnp.log1p(jnp.maximum(x, 0.0)) / _DLOG).astype(jnp.int32) + 1,
+        1, n - 1)
+    i = i - ((i > 1) & (x < zgrid[i - 1]))
+    i = i + ((i < n - 1) & (x >= zgrid[i]))
+    return jnp.where(x >= zgrid[-1], n - 1, i)
+
+
 def _interp_zgrid(z, log_grid):
     """``jnp.interp(z, zgrid, log_grid)`` with the node index in closed form.
 
@@ -69,12 +107,7 @@ def _interp_zgrid(z, log_grid):
     x = jnp.asarray(z)
     x = x.astype(jnp.result_type(x.dtype, zgrid.dtype))
     fp = jnp.asarray(log_grid)
-    n = zgrid.shape[0]
-    i = jnp.clip(
-        jnp.floor(jnp.log1p(jnp.maximum(x, 0.0)) / _DLOG).astype(jnp.int32) + 1,
-        1, n - 1)
-    i = i - ((i > 1) & (x < zgrid[i - 1]))
-    i = i + ((i < n - 1) & (x >= zgrid[i]))
+    i = zgrid_upper_index(x)
     df = fp[i] - fp[i - 1]
     dx = zgrid[i] - zgrid[i - 1]
     delta = x - zgrid[i - 1]

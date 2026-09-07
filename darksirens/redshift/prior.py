@@ -97,7 +97,7 @@ from darksirens.redshift.completion import (
     _resolve_member_logq_row,
 )
 
-from darksirens.redshift.grid import log_interp_zgrid, zgrid
+from darksirens.redshift.grid import log_interp_zgrid, zgrid, zgrid_upper_index
 # The seam kernel lives in likelihood/latent_q.py (PLAN §3.5, "the single
 # seam"); ``darksirens.likelihood.__init__`` is empty, so this is not a cycle.
 from darksirens.likelihood.latent_q import latent_logq_at
@@ -721,10 +721,25 @@ def _interp_row(table_row_lo, table_row_hi, t):
 def _grid_bracket(z):
     """Index and weight bracketing ``z`` on ``zgrid`` (endpoint-clamped).
 
+    The index comes from :func:`~darksirens.redshift.grid.zgrid_upper_index`,
+    the closed form of ``searchsorted(zgrid, z, side='right')`` on the
+    uniform-log(1+z) grid (``clip(ss, 1, n-1) - 1 == clip(ss - 1, 0, n-2)`` at
+    both ends, so the two conventions are one function).  It replaces jax
+    0.4.34's default ``method='scan'`` searchsorted -- an 11-level ``lax.scan``
+    with a dependent gather per level, which also splits the per-sample fusion
+    of this evaluator -- and honours the same
+    ``DARKSIRENS_INTERP_SEARCHSORTED`` escape hatch.
+
     NaN z propagates to a NaN weight, which downstream positivity checks
-    turn into -inf (never probability 1).
+    turn into -inf (never probability 1).  The closed form lands NaN on a
+    different (in-range) index than ``searchsorted`` does, which is inert:
+    ``t`` is NaN on both paths and every consumer of ``idx`` folds the two
+    gathered nodes through ``_interp_row(lo, hi, t)``, so ``miss`` is NaN and
+    ``where(miss > 0, ...)`` returns -inf either way.  On the production path
+    neither NaN nor +inf is reachable: dL is clipped to the distance grid
+    before ``z_of_dL_precomputed``.
     """
-    idx = jnp.clip(jnp.searchsorted(zgrid, z, side="right") - 1, 0, zgrid.size - 2)
+    idx = jnp.clip(zgrid_upper_index(z) - 1, 0, zgrid.size - 2)
     t = (z - zgrid[idx]) / (zgrid[idx + 1] - zgrid[idx])
     return idx, jnp.clip(t, 0.0, 1.0)
 
