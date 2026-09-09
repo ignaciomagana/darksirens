@@ -220,11 +220,11 @@ def validate_selection_inputs(path: str | Path) -> dict[str, Any]:
                 # which is the loaders' basis negotiation, DS-09); anything
                 # else -- e.g. chieff_chip -- has no darksirens consumer.
                 basis = _decode(f.attrs.get("spin_basis", "chieff")) or "chieff"
-                if basis not in ("chieff", "component"):
+                if basis not in ("chieff", "chieff_reference", "component"):
                     raise ValueError(
                         f"gwcat selection file uses spin_basis={basis!r}; "
-                        "darksirens consumes only the 'chieff' and "
-                        "'component' bases"
+                        "darksirens consumes only the 'chieff', "
+                        "'chieff_reference' and 'component' bases"
                     )
                 _check_store_contract(f, fmt, basis=basis)
                 # DS-03: a chi_eff product whose campaigns did not draw spins

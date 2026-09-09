@@ -197,6 +197,14 @@ IMPLIED_FIT_COLUMNS: dict[str, tuple[str, ...]] = {
     "chieff": ("m1det", "q", "dL", "chieff"),
     "component": ("m1det", "q", "dL") + COMPONENT_SPIN_DATASETS,
     "chieff_chip": ("m1det", "q", "dL", "chieff", "chip"),
+    # gwcat's chieff_reference basis (selection side only): the campaign's
+    # EXACT component draw density reweighted to a declared isotropic
+    # uniform-magnitude reference spin prior, so pdraw is a density in
+    # (m1det, q, dL, chieff) with the 1-D chi_eff marginal included -- the
+    # same object a chieff export writes, obtained without assuming how the
+    # campaign drew its spins.  It pairs with a chieff PE file whose
+    # chi_eff_amax equals the file's spin_reference_amax.
+    "chieff_reference": ("m1det", "q", "dL", "chieff"),
 }
 
 #: Advisory columns implied per basis for pre-2.1 files: datasets gwcat ships
@@ -206,6 +214,7 @@ IMPLIED_ADVISORY_COLUMNS: dict[str, tuple[str, ...]] = {
     "chieff": (),
     "component": ("chieff", "chip"),
     "chieff_chip": (),
+    "chieff_reference": ("a1", "a2", "cost1", "cost2", "chip"),
 }
 
 _COMPONENT_RANGES = {
