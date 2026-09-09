@@ -783,10 +783,10 @@ def load_selection_store(file, allow_invalid_spin_swap=False,
         # Basis negotiation (DS-09) before the member checks.
         required = tuple(fit_columns) if fit_columns is not None else _CHIEFF_FIT_COLUMNS
         file_basis = _negotiate_spin_basis(f, file, required, reexport_hint)
-        # The spin-swap validity gate applies to PROJECTION bases only: the
-        # component basis needs no swap (its flat draw factor is exact for
-        # any campaign), which is precisely why it is the remedy the gate
-        # names.
+        # The spin-swap validity gate applies to the SUBSTITUTING chieff
+        # basis only: the component basis needs no swap (its flat draw factor
+        # is exact for any campaign), and chieff_reference reweights the exact
+        # component density to the reference prior instead of assuming one.
         if file_basis == "chieff":
             _require_valid_spin_swap(f, file, allow_invalid=allow_invalid_spin_swap)
         contract = store_contract.contract_for(fmt, file_basis)
@@ -843,7 +843,26 @@ def load_selection_store(file, allow_invalid_spin_swap=False,
         # density, no swap exists to apply, and nothing must be folded in
         # here.  A component file claiming True is contradictory (a 1-D
         # marginal folded into a 4-D-basis density) and refused.
-        if file_basis != "chieff":
+        if file_basis == "chieff_reference":
+            # The reference basis REWEIGHTS the exact component draw to the
+            # declared reference prior, so pdraw carries the 1-D chi_eff
+            # marginal by construction and the swap-validity gate above does
+            # not apply (nothing was assumed about the campaign).  A file in
+            # this basis stamping False contradicts its own definition.
+            if not bool(f.attrs["chi_eff_swap_applied"]):
+                raise RuntimeError(
+                    f"Selection file {file!r} declares chi_eff_swap_applied="
+                    "False in the 'chieff_reference' basis, whose pdraw "
+                    "includes the reference chi_eff prior by construction; "
+                    "the export is malformed."
+                )
+            if "spin_reference_amax" not in f.attrs:
+                raise RuntimeError(
+                    f"Selection file {file!r} is in the 'chieff_reference' "
+                    "basis but records no spin_reference_amax; the density "
+                    "it writes is against a reference prior it does not name."
+                )
+        elif file_basis != "chieff":
             if bool(f.attrs["chi_eff_swap_applied"]):
                 raise RuntimeError(
                     f"Selection file {file!r} declares chi_eff_swap_applied="

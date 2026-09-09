@@ -939,3 +939,62 @@ def test_component_selection_claiming_the_swap_is_malformed(tmp_path):
                      chi_eff_swap_applied=True)
     with pytest.raises(RuntimeError, match="malformed"):
         load_selection_samples(path, fit_columns=_COMPONENT_COLUMNS)
+
+
+# ----------------------------------------------------------------------------
+# chieff_reference selection basis: gwcat's replacement for the chi_eff swap
+# on campaigns that did not draw spins uniform-in-magnitude/isotropic (O4ab).
+# pdraw is the EXACT component draw reweighted to a declared reference prior,
+# so it is a (m1det, q, dL, chieff) density with the 1-D chi_eff marginal
+# included -- array-compatible with a chieff export, but exempt from the
+# swap-validity gate because nothing about the campaign was assumed.
+# ----------------------------------------------------------------------------
+def _write_reference_selection(path, *, chi_eff_swap_applied=True, with_a_ref=True):
+    _write_selection(path, format_version="gwcat-selection-2.0",
+                     spin_basis="chieff_reference", extra_spin_datasets=True,
+                     chi_eff_swap_applied=chi_eff_swap_applied)
+    with h5py.File(path, "a") as f:
+        # The whole point of the basis: a non-uniform campaign is fine.
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([True, False])
+        if with_a_ref:
+            f.attrs["spin_reference_amax"] = 0.99
+
+
+def test_chieff_reference_selection_accepted_despite_non_uniform_campaign(tmp_path):
+    ref = tmp_path / "sel_ref.h5"
+    chi = tmp_path / "sel_chieff.h5"
+    _write_reference_selection(ref)
+    _write_selection(chi, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    out_ref = load_selection_samples(ref)
+    out_chi = load_selection_samples(chi)
+    assert out_ref[7] == out_chi[7] == 1000
+    for a, b in zip(out_ref[:7], out_chi[:7]):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_chieff_reference_selection_without_swap_is_malformed(tmp_path):
+    ref = tmp_path / "sel_ref_noswap.h5"
+    _write_reference_selection(ref, chi_eff_swap_applied=False)
+    with pytest.raises(RuntimeError, match="malformed"):
+        load_selection_samples(ref)
+
+
+def test_chieff_reference_selection_must_name_its_reference(tmp_path):
+    ref = tmp_path / "sel_ref_noamax.h5"
+    _write_reference_selection(ref, with_a_ref=False)
+    with pytest.raises(RuntimeError, match="spin_reference_amax"):
+        load_selection_samples(ref)
+
+
+def test_chieff_reference_component_columns_are_advisory(tmp_path):
+    ref = tmp_path / "sel_ref_adv.h5"
+    _write_reference_selection(ref)
+    with pytest.raises(RuntimeError, match="ADVISORY"):
+        load_selection_samples(ref, fit_columns=_COMPONENT_COLUMNS)
+
+
+def test_file_contract_accepts_chieff_reference_selection(tmp_path):
+    ref = tmp_path / "sel_ref_fc.h5"
+    _write_reference_selection(ref)
+    report = file_contract.validate_selection_inputs(ref)
+    assert report["ok"], report["errors"]
