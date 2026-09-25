@@ -32,6 +32,27 @@ GALAXY_DENSITY_DELTA="${GALAXY_DENSITY_DELTA:-0.0}"
 W0="${W0:--1.0}"
 WA="${WA:-0.0}"
 LOG10N0="$(python -c 'import math, sys; print(math.log10(float(sys.argv[1])))' "${N0}")"
+# The mock truth must lie inside the log10n0 prior the sampler draws from:
+# RUN_INFERENCE=1 runs with --fix_survey False, so an N0 override outside the
+# prior (e.g. N0=5e-5 -> log10n0=-4.30103 < -4) gives the injected truth ZERO
+# prior support, silently.  LOG10N0_PRIOR='[lo, hi]' widens the prior and is
+# forwarded to the sampler as --prior_overrides; without it the run is refused.
+LOG10N0_PRIOR="${LOG10N0_PRIOR:-}"
+LOG10N0_PRIOR_CHECK="$(python - "${LOG10N0}" "${LOG10N0_PRIOR}" <<'PY'
+import json, sys
+truth = float(sys.argv[1])
+if sys.argv[2]:
+    lo, hi = (float(v) for v in json.loads(sys.argv[2]))
+else:
+    try:
+        from darksirens.inference.prior import _SURVEY_BLOCK
+        lo, hi = next((p.lower, p.upper) for p in _SURVEY_BLOCK if p.label == "log10n0")
+    except Exception:
+        lo, hi = -4.0, -1.0  # documented default (docs/source/guide/inference.md)
+print("ok" if lo <= truth <= hi else
+      f"log10(N0) = {truth!r} is outside the log10n0 prior [{lo}, {hi}]")
+PY
+)"
 
 # Mock size/performance knobs.
 NSIDE="${NSIDE:-128}"
@@ -63,6 +84,19 @@ SKY_UNCERTAINTY_DEG="${SKY_UNCERTAINTY_DEG:-0.5}"
 
 FIXED_SURVEY_JSON="${FIXED_SURVEY_JSON:-{\"log10n0\": ${LOG10N0}, \"z50\": ${SURVEY_Z50}, \"w\": ${SURVEY_WIDTH}, \"delta\": ${GALAXY_DENSITY_DELTA}, \"b_miss\": 1.0, \"alpha_miss\": 0.5}}"
 
+if [ "${LOG10N0_PRIOR_CHECK}" != "ok" ]; then
+  if [ "${RUN_INFERENCE}" = "1" ]; then
+    echo "ERROR: ${LOG10N0_PRIOR_CHECK}; the mock truth would have zero prior support." >&2
+    echo "       Choose N0 inside the prior, or set LOG10N0_PRIOR='[lo, hi]' to cover it." >&2
+    exit 2
+  fi
+  echo "WARNING: ${LOG10N0_PRIOR_CHECK} (generation only; RUN_INFERENCE=0)." >&2
+fi
+prior_override_args=""
+if [ -n "${LOG10N0_PRIOR}" ]; then
+  prior_override_args="{\"log10n0\": ${LOG10N0_PRIOR}}"
+fi
+
 cd "${ROOT_DIR}"
 mkdir -p "${OUTDIR}"
 
@@ -72,6 +106,7 @@ Starting verbose mock data validation.
   OUTDIR=${OUTDIR}
   SEED=${SEED}
   N0=${N0}
+  LOG10N0=${LOG10N0} (prior check: ${LOG10N0_PRIOR_CHECK})
   ZMAX=${ZMAX}
   SURVEY_Z50=${SURVEY_Z50}
   SURVEY_WIDTH=${SURVEY_WIDTH}
@@ -175,6 +210,7 @@ if [ "${RUN_INFERENCE}" = "1" ]; then
     --dlogz "${INFERENCE_DLOGZ}" \
     --seed "${SEED}" \
     --show_progress True \
+    ${prior_override_args:+--prior_overrides "${prior_override_args}"} \
     --save_path "${OUTDIR}/inference_realistic"
 fi
 

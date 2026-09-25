@@ -56,6 +56,24 @@ from jax import lax
 
 SELECTION_PROPOSALS = ("population", "uniform", "population+uniform")
 
+#: The inference prior on ``log10n0`` (log10 of the comoving galaxy density in
+#: Mpc^-3, NOT h^3 Mpc^-3), mirrored from the survey registry
+#: ``darksirens.inference.prior._SURVEY_BLOCK`` so this generator stays
+#: importable without the package.  A mock whose injected density falls outside
+#: it has ZERO prior support when ``log10n0`` is sampled (the default
+#: ``--fix_survey false`` inference), and only a "fixed value outside default
+#: prior bounds" warning when it is pinned.
+LOG10N0_INFERENCE_PRIOR = (-4.0, -1.0)
+
+
+def _log10n0_inference_prior() -> tuple[float, float]:
+    try:  # prefer the installed registry when darksirens is importable
+        from darksirens.inference.prior import _SURVEY_BLOCK
+        return next((float(p.lower), float(p.upper))
+                    for p in _SURVEY_BLOCK if p.label == "log10n0")
+    except Exception:
+        return LOG10N0_INFERENCE_PRIOR
+
 @dataclass(frozen=True)
 class PopulationConfig:
     """Registry-fixed POWER LAW + PEAK with shared beta, spin, and gamma.
@@ -1603,6 +1621,22 @@ def write_mock_data(args: argparse.Namespace) -> None:
     )
     if args.verbose and args.n0 is not None:
         print(f"Derived {n_galaxies:,} galaxies from n0={args.n0:g} Mpc^-3 over z=[0, {zmax:g}].")
+    # The injected density, whichever flag set it, in the units the likelihood's
+    # dN_exp = n0 apix dV_c/dz (1+z)^delta uses: comoving Mpc^-3 at the
+    # generating H0 (not h^3 Mpc^-3), full sky.  --n-galaxies implies it.
+    density_weighted_volume = float(_trapezoid(
+        grids["dvc_dz"] * (1.0 + grids["z"]) ** args.galaxy_density_delta, grids["z"]))
+    n0_injected = (float(args.n0) if args.n0 is not None
+                   else float(n_galaxies) / density_weighted_volume)
+    log10n0_injected = float(np.log10(n0_injected))
+    prior_lo, prior_hi = _log10n0_inference_prior()
+    log10n0_inside_prior = bool(prior_lo <= log10n0_injected <= prior_hi)
+    if not log10n0_inside_prior:
+        print(f"WARNING: injected log10n0 = {log10n0_injected:.6f} (n0 = {n0_injected:.6g} "
+              f"Mpc^-3) is OUTSIDE the default inference prior [{prior_lo}, {prior_hi}]: sampling "
+              "log10n0 gives the mock truth zero prior support. Pass a covering "
+              "--prior_overrides to the inference, or pin log10n0 deliberately.",
+              file=sys.stderr, flush=True)
 
     complete = _generate_complete_catalog(rng, n_galaxies, grids, survey)
 
@@ -1798,6 +1832,19 @@ def write_mock_data(args: argparse.Namespace) -> None:
         "cosmology": {"H0": args.H0, "Om0": args.Om0, "w0": args.w0, "wa": args.wa},
         "population": asdict(pop),
         "survey": asdict(survey),
+        # The injected galaxy density: previously recorded nowhere in the
+        # products, so a mock could not be checked against the inference prior.
+        "galaxy_density": {
+            "n0": n0_injected,
+            "log10n0": log10n0_injected,
+            "units": "comoving Mpc^-3 at cosmology.H0 (not h^3 Mpc^-3), full sky",
+            "source": "--n0" if args.n0 is not None else "--n-galaxies",
+            "delta": float(args.galaxy_density_delta),
+            "zmax": zmax,
+            "n_complete": int(n_galaxies),
+            "inference_prior_log10n0": [prior_lo, prior_hi],
+            "inside_inference_prior": log10n0_inside_prior,
+        },
         "snr_threshold": args.snr_threshold,
         "selection_proposal": args.proposal,
         "snr_ref": args.snr_ref,
